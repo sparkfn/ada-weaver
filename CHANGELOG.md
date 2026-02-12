@@ -9,6 +9,40 @@
 
 ---
 
+## v1.4.0 — 2026-02-13
+
+**Web Dashboard, Continue Command, and Coder Planning Phase.** Adds a visual web dashboard for managing agent processes, the ability to resume review/fix cycles on existing PRs, and a mandatory planning phase for the coder subagent.
+
+### Added
+- **Web dashboard** (`src/dashboard.ts`, `static/dashboard.html`) — React 18 + MUI 6 SPA at `localhost:3000` with dark theme
+- Process table with status chips, phase indicators, live elapsed timers
+- Detail view (side drawer or full-page) with phase timeline, live streaming logs, cancel button
+- History panel reading from `last_poll.json`
+- SSE `/api/events` endpoint for real-time process updates with heartbeat
+- REST API: `/api/status`, `/api/processes`, `/api/processes/:id`, `/api/history`
+- **ProcessManager** (`src/process-manager.ts`) — `EventEmitter`-based process lifecycle manager
+- Console interception for log capture during process execution
+- `AbortController` per process for cancellation
+- Typed events: `process_started`, `process_updated`, `process_completed`, `process_failed`, `process_cancelled`, `process_log`
+- **`continue` CLI command** — `deepagents continue --issue N --pr N --branch NAME`
+- Resumes review→fix cycle on existing PR without re-running issuer/coder from scratch
+- Dashboard "Continue" tab in new process dialog
+- `POST /api/processes/continue` endpoint
+- **Coder planning phase** — mandatory Phase 1 (read files, produce execution plan) before Phase 2 (execute)
+- Plan included in issue comment and PR body
+- Applies to both new issues and fix iterations
+- **`logDiff()`** in `logger.ts` — colored terminal diff output after coder completes
+- `pnpm run dashboard` and `pnpm run continue` script shorthands
+- 18 tests in `tests/process-manager.test.ts`, 19 tests in `tests/dashboard.test.ts`
+
+### Changed
+- `runArchitect()` accepts `onProgress`, `signal`, and `continueContext` options (backward-compatible)
+- `runReviewSingle()` accepts `signal` option (backward-compatible)
+- CLI: added `dashboard` and `continue` commands with `--port` and `--branch` flags
+- Coder subagent system prompt restructured into Planning + Execution phases
+
+---
+
 ## v1.3.0 — 2026-02-12
 
 **Architect Supervisor — Multi-Agent Team with LLM-Driven Orchestration.** Replaces the deterministic pipeline (Triage → Analysis → Review → Fix loop) with a non-deterministic Architect agent that coordinates specialist subagents via LLM reasoning.

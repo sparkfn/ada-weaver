@@ -137,15 +137,24 @@ GitHub ──webhook──► │  [Caddy :443] ──► [Node :3000]  │
 
 **Milestone:** Draft PRs are automatically reviewed via webhook or `deepagents review --pr N`. Reviews are COMMENT-only (hardcoded). Humans see both the analysis and the review before deciding to merge.
 
-**Pipeline (v1.3.0+ — Architect supervisor):**
+**Pipeline (v1.4.0+ — Architect supervisor with dashboard):**
 ```
-Issue opened
+Issue opened (or triggered from dashboard / CLI)
   → Architect (supervisor, LLM-driven orchestration)
       → Issuer subagent (understand issue, produce brief)
-      → Coder subagent (comment, branch, commit, PR)
+      → Coder subagent (plan → execute: comment, branch, commit, PR)
       → Reviewer subagent (diff review, COMMENT only)
       → [optional: iterate Coder→Reviewer if needs_changes]
           → Human merges (or not)
+
+Continue (resume on existing PR):
+  → Architect skips issuer + initial coder
+      → Reviewer subagent (review existing PR)
+      → [iterate Coder-fix→Reviewer up to limit]
+
+Dashboard (localhost:3000):
+  → Start/continue/cancel processes via web UI
+  → Live logs via SSE, process lifecycle tracking
 ```
 
 ---
@@ -160,6 +169,7 @@ Incremental improvements after the v1.0.0 milestone. These are not new phases �
 | v1.2.0 | Agent-human interactive dialog (#48, #49) | ✓ v1.2.0 |
 | v1.2.1 | SSE streaming with thinking display and token usage (#51) | ✓ v1.2.1 |
 | v1.3.0 | Architect supervisor — multi-agent team with LLM-driven orchestration | ✓ v1.3.0 |
+| v1.4.0 | Web dashboard, continue command, coder planning phase | ✓ v1.4.0 |
 
 ---
 

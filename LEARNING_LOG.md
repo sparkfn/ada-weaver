@@ -5585,3 +5585,103 @@ This means:
 - **Entry 1** (Project Overview): config.ts was the simplest file — "read and validate config.json." Now it's the merge layer between two config sources.
 - **Entry 43** (GitHub App Auth): The `privateKeyPath` confusion was a direct consequence of adding App auth. Env vars make the Docker mount path clearer.
 - **Entry 30** (Webhook Listener): Webhook secret was already in `config.json`. Now `WEBHOOK_SECRET` env var is a more natural fit for Docker deployments.
+
+---
+
+## Entry 48: Web Dashboard, Continue Command, and Coder Planning Phase
+
+**Date:** 2026-02-13
+**Author:** Architect Agent
+
+### The problem: no visibility, no continuation, no planning
+
+Three gaps in the workflow became apparent:
+
+1. **No visual management.** The CLI runs agents in a terminal — you can't see what's running, view live logs from multiple processes, or cancel something mid-flight without `Ctrl+C`. For a system that can run multi-minute agent pipelines, a dashboard is essential.
+2. **No way to continue.** When the architect finishes an analysis and the reviewer says "needs changes," you had to re-run the entire pipeline from scratch — issuer, coder, reviewer — even though the branch and PR already exist. The review-fix loop couldn't be resumed.
+3. **No coder planning.** The coder subagent would jump straight into creating branches and committing files without first reading the codebase and forming an execution plan. This led to changes that didn't follow existing patterns or missed context.
+
+### What was built
+
+**Web Dashboard** (`src/dashboard.ts`, `static/dashboard.html`)
+
+A React 18 + MUI 6 SPA served at `localhost:3000`, loaded entirely from CDN (no build step). Uses the same dark theme palette as `dialog.html` (`#1a1a2e` background, `#16213e` paper, `#533483` primary).
+
+Architecture:
+```
+Browser (React SPA)              Express Server (dashboard.ts)
+  ← SSE /api/events →              ProcessManager (process-manager.ts)
+  ← REST /api/* →                     ├─ runArchitect() + signal
+                                      └─ runReviewSingle() + signal
+```
+
+The dashboard provides:
+- **Process table** — shows all running/completed/failed processes with status chips, phase indicators, and live elapsed timers
+- **Detail view** — drawer (side panel) or full-page view with phase timeline (issuer → coder → reviewer), live streaming logs, PR links, and cancel button
+- **History panel** — reads `last_poll.json` to show previously completed issues
+- **New process dialog** — three tabs: Analyze Issue, Review PR, and Continue (resume review-fix cycle on existing PR)
+
+**ProcessManager** (`src/process-manager.ts`)
+
+An `EventEmitter`-based class that manages process lifecycle:
+- Creates `AbortController` per process for cancellation
+- Intercepts `console.log`/`console.error` during process execution to capture logs — appends to the process's log array AND emits `process_log` events for SSE streaming, then calls the original console methods so terminal output still works
+- Emits typed events: `process_started`, `process_updated`, `process_completed`, `process_failed`, `process_cancelled`, `process_log`
+
+All state is in-memory (`Map<string, AgentProcess>`). No database needed — this matches the existing pattern where `MemorySaver` holds chat state in memory and `last_poll.json` handles persistence.
+
+**Continue command** (`continue` in CLI and dashboard)
+
+CLI: `deepagents continue --issue 20 --pr 21 --branch issue-20-fix`
+
+This adds a `continueContext` option to `runArchitect()` that changes the user message from "Process issue #N" to a specific instruction: "PR #21 already exists on branch X — skip the issuer, go directly to reviewer, then loop coder-fix + reviewer up to the iteration limit."
+
+The architect's system prompt is unchanged — it still has full autonomy to decide workflow, skip steps, or stop early. The continue message just sets the starting point.
+
+**Coder planning phase** (modified system prompt in `architect.ts`)
+
+The coder's prompt now has two mandatory phases:
+
+1. **Phase 1 — Planning:** Read repo structure with `list_repo_files`, read all relevant files with `read_repo_file`, identify patterns, then output a numbered execution plan listing files to change, in what order, with what specific changes.
+2. **Phase 2 — Execution:** Follow the plan. The plan is included in the issue comment and PR body.
+
+This applies to both new issues and fix iterations. For fixes, the coder still plans first: reads current state, maps reviewer feedback to specific changes, then executes.
+
+### Design decisions
+
+**SSE for live updates, not WebSockets.** The dashboard only needs server-to-client push (process events, log lines). SSE is simpler — no library needed, just `EventSource` in the browser and `res.write()` on the server. Heartbeat every 30s keeps the connection alive. Auto-reconnect with exponential backoff handles dropped connections.
+
+**Console interception for log capture.** Rather than threading a logger through every function call, the `ProcessManager` temporarily replaces `console.log` and `console.error` during process execution. This captures output from `runArchitect`, `logAgentEvent`, tool logging — everything. The original methods are restored in a `finally` block so terminal output keeps working.
+
+**AbortSignal for cancellation.** Both `runArchitect` and `runReviewSingle` now accept an optional `signal?: AbortSignal`. The stream loops check `signal.aborted` at the top of each iteration. This is the standard Web API pattern — no custom cancellation mechanism needed.
+
+**Full-page vs drawer toggle.** Process details can be viewed in a 450px side drawer (quick glance) or toggled to a full-page view (more room for logs). The detail content is a shared `ProcessDetailContent` component rendered inside either a `Drawer` or a `Paper`, with the log viewer height adapting (`350px` in drawer, `calc(100vh - 450px)` in full page).
+
+### What could go wrong
+
+- **Console interception is global.** If two processes run simultaneously, only the last one's intercept is active. This is a known limitation — production would use a proper logging abstraction. For the typical use case (one process at a time from the dashboard), this works fine.
+- **No process persistence.** If the dashboard server restarts, the in-progress process list resets. The process itself (agent running against GitHub) continues, but the dashboard loses track of it. Could be solved later with a SQLite store if needed.
+- **CDN dependency.** The dashboard HTML loads React and MUI from `esm.sh`. If the CDN is down, the dashboard won't load. This matches the `dialog.html` pattern and keeps the project buildless.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/process-manager.ts` | **New** — ProcessManager class with lifecycle, log capture, cancellation |
+| `src/dashboard.ts` | **New** — Express server with REST API + SSE |
+| `static/dashboard.html` | **New** — React + MUI SPA (dark theme, process table, detail drawer/full-page, live logs) |
+| `src/architect.ts` | Added `onProgress`, `signal`, `continueContext` to `runArchitect`; coder planning phase in system prompt; diff logging after coder completes |
+| `src/reviewer-agent.ts` | Added `signal` to `runReviewSingle` |
+| `src/cli.ts` | Added `dashboard` and `continue` commands |
+| `src/logger.ts` | Added `logDiff()` for colored terminal diff output |
+| `package.json` | Added `dashboard` and `continue` scripts |
+| `tests/process-manager.test.ts` | **New** — 18 unit tests |
+| `tests/dashboard.test.ts` | **New** — 19 Express route tests |
+
+### Connections to previous entries
+
+- **Entry 46** (Interactive Dialog): The dashboard follows the same `createApp()`/`startServer()` factory pattern from `createDialogApp()`. Both serve static HTML + Express API. Both use SSE for streaming.
+- **Entry 47** (SSE Streaming): The dashboard's SSE endpoint reuses the same `res.write(`data: ...\n\n`)` pattern from the chat stream, extended with event types and heartbeat.
+- **Entry 44** (Reviewer Bot): The continue command directly enables the reviewer's `needs_changes` verdict to trigger re-runs without restarting the entire pipeline.
+- **Entry 20** (Circuit Breaker): The coder planning phase adds another layer of quality — the coder reads first, plans, then executes within its tool call budget.
+- **Entry 32** (Graceful Shutdown): The dashboard server hooks into the same `gracefulShutdown()` signal handler, and `AbortSignal` provides clean cancellation for running processes.

@@ -490,7 +490,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-272 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+338 tests across 11 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 
@@ -524,10 +524,12 @@ learning-deep-agents/
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
     github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR, commit, review)
     reviewer-agent.ts -- Standalone PR reviewer agent (diff reader, source context, review submitter)
-    logger.ts         -- Structured logging wrapper for tool calls
+    logger.ts         -- Structured logging (tool calls, agent events, colored diff output)
     utils.ts          -- Retry with exponential backoff for API calls
     chat-agent.ts     -- Chat agent for human-agent interaction (read-only tools + checkpointer)
     listener.ts       -- Express webhook server, dialog server, HMAC-SHA256 verification
+    process-manager.ts -- EventEmitter-based agent process lifecycle manager
+    dashboard.ts      -- Express server for web dashboard (REST API + SSE)
   tests/
     architect.test.ts -- Architect supervisor, subagent factories, system prompt tests
     core.test.ts      -- Unit tests for core logic, state, graceful shutdown
@@ -538,9 +540,12 @@ learning-deep-agents/
     logger.test.ts    -- Structured logging wrapper tests
     utils.test.ts     -- Retry logic and error classification tests
     listener.test.ts  -- Webhook endpoint and signature verification tests
+    process-manager.test.ts -- Process lifecycle, log capture, cancellation tests
+    dashboard.test.ts -- Dashboard REST API and SSE endpoint tests
   issues/             -- Generated: detailed analysis files
   static/
     dialog.html       -- Chat UI for testing agent-human interaction
+    dashboard.html    -- React + MUI dashboard SPA for managing agent processes
   .env                -- Your credentials and settings (git-ignored, single source of truth)
   .env.example        -- Comprehensive template for .env
   last_poll.json      -- Generated: polling state (git-ignored)

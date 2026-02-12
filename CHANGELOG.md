@@ -31,12 +31,17 @@
 - **Coder planning phase** — mandatory Phase 1 (read files, produce execution plan) before Phase 2 (execute)
 - Plan included in issue comment and PR body
 - Applies to both new issues and fix iterations
-- **`logDiff()`** in `logger.ts` — colored terminal diff output after coder completes
+- **`logDiff()`** in `logger.ts` — ANSI-colored terminal diff output (green additions, red deletions, cyan file headers, yellow hunk headers) displayed automatically after the coder subagent completes
 - `pnpm run dashboard` and `pnpm run continue` script shorthands
+- 9 new tests for `logDiff` in `tests/logger.test.ts` (colors, truncation, edge cases)
 - 18 tests in `tests/process-manager.test.ts`, 19 tests in `tests/dashboard.test.ts`
+
+### Fixed
+- **UNKNOWN agent name in pipeline logs** — `streamEvents` v2 may deliver tool input as a serialised JSON string instead of a parsed object; input parsing now handles both formats so logs show `ISSUER`, `CODER`, `REVIEWER` instead of `UNKNOWN`
 
 ### Changed
 - `runArchitect()` accepts `onProgress`, `signal`, and `continueContext` options (backward-compatible)
+- `runArchitect()` fetches and displays the PR diff after the coder subagent completes (extracted from tool output, `continueContext`, or `findPrForIssue` fallback)
 - `runReviewSingle()` accepts `signal` option (backward-compatible)
 - CLI: added `dashboard` and `continue` commands with `--port` and `--branch` flags
 - Coder subagent system prompt restructured into Planning + Execution phases

@@ -169,7 +169,7 @@ Incremental improvements after the v1.0.0 milestone. These are not new phases �
 | v1.2.0 | Agent-human interactive dialog (#48, #49) | ✓ v1.2.0 |
 | v1.2.1 | SSE streaming with thinking display and token usage (#51) | ✓ v1.2.1 |
 | v1.3.0 | Architect supervisor — multi-agent team with LLM-driven orchestration | ✓ v1.3.0 |
-| v1.4.0 | Web dashboard, continue command, coder planning phase | ✓ v1.4.0 |
+| v1.4.0 | Web dashboard, continue command, coder planning phase, colored diff logging, UNKNOWN agent fix | ✓ v1.4.0 |
 
 ---
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { wrapWithLogging, formatDuration, logAgentEvent } from '../src/logger.js';
+import { wrapWithLogging, formatDuration, logAgentEvent, logDiff } from '../src/logger.js';
 import {
   createDryRunBranchTool,
   createDryRunCommentTool,
@@ -216,5 +216,106 @@ describe('logAgentEvent', () => {
     // Should end with the trailing dashes, no quotes
     expect(msg).not.toContain('"');
     expect(msg).toContain('completed (13s)');
+  });
+});
+
+// ── logDiff ─────────────────────────────────────────────────────────────────
+
+describe('logDiff', () => {
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  const SAMPLE_DIFF = [
+    'diff --git a/src/app.ts b/src/app.ts',
+    '--- a/src/app.ts',
+    '+++ b/src/app.ts',
+    '@@ -1,3 +1,4 @@',
+    ' const x = 1;',
+    '-const y = 2;',
+    '+const y = 3;',
+    '+const z = 4;',
+  ].join('\n');
+
+  it('outputs the header banner', () => {
+    logDiff(SAMPLE_DIFF);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const banner = lines.find((l: string) => l.includes('Code Changes'));
+    expect(banner).toBeDefined();
+  });
+
+  it('colours additions in green (ANSI 32)', () => {
+    logDiff(SAMPLE_DIFF);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const addLine = lines.find((l: string) => l.includes('+const y = 3'));
+    expect(addLine).toContain('\x1b[32m');
+  });
+
+  it('colours deletions in red (ANSI 31)', () => {
+    logDiff(SAMPLE_DIFF);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const delLine = lines.find((l: string) => l.includes('-const y = 2'));
+    expect(delLine).toContain('\x1b[31m');
+  });
+
+  it('colours hunk headers in yellow (ANSI 33)', () => {
+    logDiff(SAMPLE_DIFF);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const hunk = lines.find((l: string) => l.includes('@@'));
+    expect(hunk).toContain('\x1b[33m');
+  });
+
+  it('colours file headers in cyan (ANSI 36)', () => {
+    logDiff(SAMPLE_DIFF);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const fileHeader = lines.find((l: string) => l.includes('diff --git'));
+    expect(fileHeader).toContain('\x1b[36m');
+  });
+
+  it('dims context lines (ANSI 2)', () => {
+    logDiff(SAMPLE_DIFF);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const ctx = lines.find((l: string) => l.includes('const x = 1'));
+    expect(ctx).toContain('\x1b[2m');
+  });
+
+  it('truncates output when exceeding maxLines', () => {
+    const bigDiff = Array.from({ length: 300 }, (_, i) => `+line ${i}`).join('\n');
+    logDiff(bigDiff, 50);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const truncMsg = lines.find((l: string) => l.includes('truncated'));
+    expect(truncMsg).toBeDefined();
+    expect(truncMsg).toContain('50');
+    expect(truncMsg).toContain('300');
+  });
+
+  it('does not truncate when under maxLines', () => {
+    logDiff(SAMPLE_DIFF, 200);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const truncMsg = lines.find((l: string) => l.includes('truncated'));
+    expect(truncMsg).toBeUndefined();
+  });
+
+  it('handles empty diff string', () => {
+    logDiff('');
+
+    // Should still produce the banner without crashing
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const banner = lines.find((l: string) => l.includes('Code Changes'));
+    expect(banner).toBeDefined();
   });
 });

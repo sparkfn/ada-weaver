@@ -5670,13 +5670,14 @@ This applies to both new issues and fix iterations. For fixes, the coder still p
 | `src/process-manager.ts` | **New** — ProcessManager class with lifecycle, log capture, cancellation |
 | `src/dashboard.ts` | **New** — Express server with REST API + SSE |
 | `static/dashboard.html` | **New** — React + MUI SPA (dark theme, process table, detail drawer/full-page, live logs) |
-| `src/architect.ts` | Added `onProgress`, `signal`, `continueContext` to `runArchitect`; coder planning phase in system prompt; diff logging after coder completes |
+| `src/architect.ts` | Added `onProgress`, `signal`, `continueContext` to `runArchitect`; coder planning phase in system prompt; diff logging after coder completes; fixed UNKNOWN agent name in stream event parsing (handles string + object input) |
 | `src/reviewer-agent.ts` | Added `signal` to `runReviewSingle` |
 | `src/cli.ts` | Added `dashboard` and `continue` commands |
-| `src/logger.ts` | Added `logDiff()` for colored terminal diff output |
+| `src/logger.ts` | Added `logDiff()` for ANSI-colored terminal diff output (green/red/cyan/yellow) |
 | `package.json` | Added `dashboard` and `continue` scripts |
 | `tests/process-manager.test.ts` | **New** — 18 unit tests |
 | `tests/dashboard.test.ts` | **New** — 19 Express route tests |
+| `tests/logger.test.ts` | Added 9 tests for `logDiff` (ANSI colors, truncation, empty diff) |
 
 ### Connections to previous entries
 

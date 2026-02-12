@@ -195,7 +195,7 @@ export function createReviewerAgent(
 export async function runReviewSingle(
   config: Config,
   prNumber: number,
-  options?: { iterationContext?: { iteration: number; previousFeedback: string[] } },
+  options?: { iterationContext?: { iteration: number; previousFeedback: string[] }; signal?: AbortSignal },
 ): Promise<ReviewOutput> {
   const iteration = options?.iterationContext?.iteration ?? 1;
   console.log(`\u{1F50D} Reviewing PR #${prNumber}${iteration > 1 ? ` (iteration ${iteration})` : ''}\n`);
@@ -216,6 +216,8 @@ export async function runReviewSingle(
   );
 
   for await (const ev of stream) {
+    if (options?.signal?.aborted) break;
+
     if (ev.event === 'on_chat_model_end') {
       const content = ev.data?.output?.content;
       if (typeof content === 'string' && content) {

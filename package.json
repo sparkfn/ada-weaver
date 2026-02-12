@@ -16,7 +16,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "webhook": "tsx src/cli.ts webhook",
-    "dialog": "tsx src/cli.ts dialog"
+    "dialog": "tsx src/cli.ts dialog",
+    "dashboard": "tsx src/cli.ts dashboard",
+    "continue": "tsx src/cli.ts continue"
   },
   "dependencies": {
     "@langchain/anthropic": "^1.3.0",

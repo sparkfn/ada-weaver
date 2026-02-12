@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deep Agents Dashboard</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+      "react-dom": "https://esm.sh/react-dom@18.3.1?external=react",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react",
+      "@emotion/react": "https://esm.sh/@emotion/react@11.14.0?external=react",
+      "@emotion/styled": "https://esm.sh/@emotion/styled@11.14.0?external=react,@emotion/react",
+      "@mui/material": "https://esm.sh/@mui/material@6.4.0?external=react,react-dom,@emotion/react,@emotion/styled",
+      "@mui/icons-material": "https://esm.sh/@mui/icons-material@6.4.0?external=react,react-dom,@mui/material"
+    }
+  }
+  </script>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+    }
+    #root { min-height: 100vh; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .pulsing { animation: pulse 1.5s infinite; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="module">
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    import {
+      ThemeProvider, createTheme,
+      CssBaseline, AppBar, Toolbar, Typography, Box, Tabs, Tab,
+      Table, TableHead, TableBody, TableRow, TableCell, TableContainer,
+      Paper, Chip, IconButton, Drawer, Button, Fab,
+      Dialog, DialogTitle, DialogContent, DialogActions,
+      TextField, FormControlLabel, Checkbox, Tooltip,
+      CircularProgress, Alert, Stepper, Step, StepLabel,
+    } from '@mui/material';
+
+    const { useState, useEffect, useRef, useCallback, createElement: h, Fragment } = React;
+
+    // ── Theme ──────────────────────────────────────────────────────────────────
+
+    const theme = createTheme({
+      palette: {
+        mode: 'dark',
+        background: { default: '#1a1a2e', paper: '#16213e' },
+        primary: { main: '#7c4dff' },
+        secondary: { main: '#0f3460' },
+        success: { main: '#4caf50' },
+        error: { main: '#f44336' },
+        warning: { main: '#ff9800' },
+        info: { main: '#29b6f6' },
+      },
+      typography: { fontFamily: "'Inter', sans-serif" },
+      components: {
+        MuiPaper: { styleOverrides: { root: { backgroundImage: 'none' } } },
+        MuiTableCell: { styleOverrides: { root: { borderColor: '#0f3460' } } },
+      },
+    });
+
+    // ── StatusChip ─────────────────────────────────────────────────────────────
+
+    function StatusChip({ status }) {
+      const map = {
+        running:   { color: 'info',    label: 'Running' },
+        completed: { color: 'success', label: 'Completed' },
+        failed:    { color: 'error',   label: 'Failed' },
+        cancelled: { color: 'warning', label: 'Cancelled' },
+      };
+      const cfg = map[status] || { color: 'default', label: status };
+      return h(Chip, {
+        label: cfg.label,
+        color: cfg.color,
+        size: 'small',
+        icon: status === 'running' ? h(CircularProgress, { size: 14, color: 'inherit' }) : undefined,
+        sx: { fontWeight: 500 },
+      });
+    }
+
+    // ── PhaseTimeline ──────────────────────────────────────────────────────────
+
+    function PhaseTimeline({ currentPhase, status }) {
+      const phases = ['issuer', 'coder', 'reviewer'];
+      const activeIdx = phases.indexOf(currentPhase || '');
+      const done = status === 'completed' || status === 'failed' || status === 'cancelled';
+
+      return h(Stepper, { activeStep: done ? phases.length : activeIdx, alternativeLabel: true, sx: { my: 2 } },
+        phases.map((phase) =>
+          h(Step, { key: phase },
+            h(StepLabel, null, phase.charAt(0).toUpperCase() + phase.slice(1))
+          )
+        )
+      );
+    }
+
+    // ── LiveLogs ───────────────────────────────────────────────────────────────
+
+    function LiveLogs({ logs, fullPage }) {
+      const containerRef = useRef(null);
+      const autoScrollRef = useRef(true);
+
+      useEffect(() => {
+        const el = containerRef.current;
+        if (el && autoScrollRef.current) {
+          el.scrollTop = el.scrollHeight;
+        }
+      }, [logs.length]);
+
+      function handleScroll() {
+        const el = containerRef.current;
+        if (!el) return;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        autoScrollRef.current = atBottom;
+      }
+
+      return h(Box, {
+        ref: containerRef,
+        onScroll: handleScroll,
+        sx: {
+          mt: 2, p: 1.5,
+          background: '#0d0d1a',
+          borderRadius: 1,
+          fontFamily: 'monospace',
+          fontSize: 12,
+          lineHeight: 1.6,
+          maxHeight: fullPage ? 'calc(100vh - 450px)' : 350,
+          overflowY: 'auto',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-all',
+          border: '1px solid #1e1e3a',
+        },
+      },
+        logs.length === 0
+          ? h(Typography, { variant: 'body2', color: 'text.secondary', sx: { fontStyle: 'italic' } }, 'No logs yet...')
+          : logs.map((line, i) =>
+              h(Box, {
+                key: i,
+                component: 'div',
+                sx: {
+                  color: line.startsWith('[ERROR]') ? '#f44336' : '#b0b0b0',
+                  py: 0.1,
+                },
+              }, line)
+            )
+      );
+    }
+
+    // ── ProcessDetailContent (shared between drawer and full-page) ────────────
+
+    function ProcessDetailContent({ process: proc, onCancel, onClose, logs, fullPage, onToggleFullPage }) {
+      if (!proc) return null;
+
+      const [elapsed, setElapsed] = useState('');
+
+      useEffect(() => {
+        if (proc.status !== 'running') {
+          if (proc.startedAt && proc.completedAt) {
+            setElapsed(formatDuration(new Date(proc.completedAt) - new Date(proc.startedAt)));
+          }
+          return;
+        }
+        const tick = () => setElapsed(formatDuration(Date.now() - new Date(proc.startedAt).getTime()));
+        tick();
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
+      }, [proc.status, proc.startedAt, proc.completedAt]);
+
+      const label = proc.type === 'analyze'
+        ? `Issue #${proc.issueNumber}`
+        : `PR #${proc.prNumber}`;
+
+      return h(Box, { sx: { p: fullPage ? 0 : undefined } },
+        // Header with title and view toggle
+        h(Box, { sx: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 } },
+          h(Typography, { variant: fullPage ? 'h5' : 'h6', sx: { fontWeight: 600 } }, label),
+          h(Box, { sx: { display: 'flex', gap: 1 } },
+            h(Tooltip, { title: fullPage ? 'Side panel view' : 'Full page view' },
+              h(IconButton, {
+                size: 'small',
+                onClick: onToggleFullPage,
+                sx: { color: '#7c4dff' },
+              }, fullPage ? '\u25E8' : '\u2922')
+            ),
+            onClose
+              ? h(Tooltip, { title: 'Close' },
+                  h(IconButton, { size: 'small', onClick: onClose }, '\u2715')
+                )
+              : null,
+          ),
+        ),
+
+        h(StatusChip, { status: proc.status }),
+        h(Box, { sx: { mt: 1 } },
+          h(Typography, { variant: 'body2', color: 'text.secondary' },
+            `Type: ${proc.type} | Started: ${new Date(proc.startedAt).toLocaleTimeString()}`
+          ),
+          h(Typography, { variant: 'body2', color: 'text.secondary' },
+            `Duration: ${elapsed || '...'}`
+          ),
+          proc.prNumber && proc.type === 'analyze'
+            ? h(Typography, { variant: 'body2', sx: { mt: 0.5 } },
+                'PR: ',
+                h('a', {
+                  href: `https://github.com/${proc.owner}/${proc.repo}/pull/${proc.prNumber}`,
+                  target: '_blank',
+                  rel: 'noopener',
+                  style: { color: '#7c4dff' },
+                }, `#${proc.prNumber}`)
+              )
+            : null,
+        ),
+
+        proc.type === 'analyze'
+          ? h(PhaseTimeline, { currentPhase: proc.currentPhase, status: proc.status })
+          : null,
+
+        proc.iteration && proc.maxIterations
+          ? h(Typography, { variant: 'body2', color: 'text.secondary', sx: { mb: 1 } },
+              `Iteration: ${proc.iteration} / ${proc.maxIterations}`)
+          : null,
+
+        proc.outcome
+          ? h(Box, { sx: { mt: 2 } },
+              h(Typography, { variant: 'subtitle2', gutterBottom: true }, 'Outcome'),
+              h(Paper, { sx: { p: 1.5, fontSize: 13, maxHeight: fullPage ? 300 : 150, overflowY: 'auto', background: '#0d0d1a' } },
+                proc.outcome.slice(0, 2000)
+              )
+            )
+          : null,
+
+        proc.error
+          ? h(Alert, { severity: 'error', sx: { mt: 2 } }, proc.error)
+          : null,
+
+        h(Typography, { variant: 'subtitle2', sx: { mt: 2 } }, 'Live Logs'),
+        h(LiveLogs, { logs, fullPage }),
+
+        proc.status === 'running'
+          ? h(Button, {
+              variant: 'outlined',
+              color: 'error',
+              fullWidth: true,
+              sx: { mt: 3 },
+              onClick: () => onCancel(proc.id),
+            }, 'Cancel Process')
+          : null,
+      );
+    }
+
+    // ── ProcessDetailDrawer ────────────────────────────────────────────────────
+
+    function ProcessDetailDrawer({ process: proc, open, onClose, onCancel, logs, onToggleFullPage }) {
+      if (!proc) return null;
+
+      return h(Drawer, { anchor: 'right', open, onClose, PaperProps: { sx: { width: { xs: '100%', sm: 450 }, p: 3, background: '#16213e' } } },
+        h(ProcessDetailContent, {
+          process: proc,
+          onCancel,
+          onClose,
+          logs,
+          fullPage: false,
+          onToggleFullPage,
+        }),
+      );
+    }
+
+    // ── ProcessDetailFullPage ──────────────────────────────────────────────────
+
+    function ProcessDetailFullPage({ process: proc, onCancel, onBack, logs, onToggleFullPage }) {
+      if (!proc) return null;
+
+      return h(Box, { sx: { maxWidth: 1000, mx: 'auto' } },
+        h(Button, {
+          size: 'small',
+          sx: { mb: 2, color: '#7c4dff' },
+          onClick: onBack,
+        }, '\u2190 Back to Processes'),
+        h(Paper, { sx: { p: 3, background: '#16213e' } },
+          h(ProcessDetailContent, {
+            process: proc,
+            onCancel,
+            onClose: null,
+            logs,
+            fullPage: true,
+            onToggleFullPage,
+          }),
+        ),
+      );
+    }
+
+    // ── ProcessesTable ─────────────────────────────────────────────────────────
+
+    function ProcessesTable({ processes, onSelect, onCancel }) {
+      if (processes.length === 0) {
+        return h(Box, { sx: { p: 4, textAlign: 'center' } },
+          h(Typography, { color: 'text.secondary' }, 'No processes yet. Click + to start one.')
+        );
+      }
+
+      return h(TableContainer, { component: Paper, sx: { background: '#16213e' } },
+        h(Table, { size: 'small' },
+          h(TableHead, null,
+            h(TableRow, null,
+              h(TableCell, null, 'Status'),
+              h(TableCell, null, 'Type'),
+              h(TableCell, null, '#'),
+              h(TableCell, null, 'Phase'),
+              h(TableCell, null, 'Time'),
+              h(TableCell, { align: 'right' }, 'Actions'),
+            ),
+          ),
+          h(TableBody, null,
+            processes.map(proc =>
+              h(TableRow, {
+                key: proc.id,
+                hover: true,
+                sx: { cursor: 'pointer', '&:hover': { background: '#1e2a4a' } },
+                onClick: () => onSelect(proc),
+              },
+                h(TableCell, null, h(StatusChip, { status: proc.status })),
+                h(TableCell, null, proc.type),
+                h(TableCell, null,
+                  proc.type === 'analyze' ? `Issue #${proc.issueNumber}` : `PR #${proc.prNumber}`
+                ),
+                h(TableCell, null,
+                  proc.currentPhase
+                    ? h(Chip, { label: proc.currentPhase, size: 'small', variant: 'outlined' })
+                    : '\u2014'
+                ),
+                h(TableCell, null, h(ElapsedTime, { startedAt: proc.startedAt, completedAt: proc.completedAt, status: proc.status })),
+                h(TableCell, { align: 'right' },
+                  proc.status === 'running'
+                    ? h(Tooltip, { title: 'Cancel' },
+                        h(IconButton, {
+                          size: 'small',
+                          color: 'error',
+                          onClick: (e) => { e.stopPropagation(); onCancel(proc.id); },
+                        }, '\u2716')
+                      )
+                    : null,
+                ),
+              )
+            ),
+          ),
+        ),
+      );
+    }
+
+    // ── ElapsedTime ────────────────────────────────────────────────────────────
+
+    function ElapsedTime({ startedAt, completedAt, status }) {
+      const [text, setText] = useState('');
+
+      useEffect(() => {
+        if (status !== 'running') {
+          if (startedAt && completedAt) {
+            setText(formatDuration(new Date(completedAt) - new Date(startedAt)));
+          }
+          return;
+        }
+        const tick = () => setText(formatDuration(Date.now() - new Date(startedAt).getTime()));
+        tick();
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
+      }, [status, startedAt, completedAt]);
+
+      return h(Typography, { variant: 'body2', sx: { fontFamily: 'monospace', fontSize: 13 } }, text);
+    }
+
+    function formatDuration(ms) {
+      if (ms < 1000) return '<1s';
+      const s = Math.floor(ms / 1000);
+      if (s < 60) return s + 's';
+      const m = Math.floor(s / 60);
+      const rem = s % 60;
+      return rem ? `${m}m ${rem}s` : `${m}m`;
+    }
+
+    // ── HistoryPanel ───────────────────────────────────────────────────────────
+
+    function HistoryPanel({ history }) {
+      if (!history || !history.issues || Object.keys(history.issues).length === 0) {
+        return h(Box, { sx: { p: 4, textAlign: 'center' } },
+          h(Typography, { color: 'text.secondary' }, 'No history found. Run some analyses first.')
+        );
+      }
+
+      const entries = Object.entries(history.issues);
+
+      return h(TableContainer, { component: Paper, sx: { background: '#16213e' } },
+        h(Table, { size: 'small' },
+          h(TableHead, null,
+            h(TableRow, null,
+              h(TableCell, null, 'Issue #'),
+              h(TableCell, null, 'Branch'),
+              h(TableCell, null, 'PR'),
+              h(TableCell, null, 'Commits'),
+              h(TableCell, null, 'Comment'),
+            ),
+          ),
+          h(TableBody, null,
+            entries.map(([num, actions]) =>
+              h(TableRow, { key: num },
+                h(TableCell, null, `#${num}`),
+                h(TableCell, null,
+                  actions.branch ? h(Chip, { label: actions.branch.name, size: 'small', variant: 'outlined' }) : '\u2014'
+                ),
+                h(TableCell, null,
+                  actions.pr
+                    ? h('a', {
+                        href: actions.pr.html_url || '#',
+                        target: '_blank',
+                        rel: 'noopener',
+                        style: { color: '#7c4dff', textDecoration: 'none' },
+                      }, `#${actions.pr.number}`)
+                    : '\u2014'
+                ),
+                h(TableCell, null, actions.commits ? actions.commits.length : 0),
+                h(TableCell, null, actions.comment ? 'Yes' : '\u2014'),
+              )
+            ),
+          ),
+        ),
+      );
+    }
+
+    // ── NewProcessDialog ───────────────────────────────────────────────────────
+
+    function NewProcessDialog({ open, onClose, onSubmit }) {
+      const [tab, setTab] = useState(0);
+      const [issueNumber, setIssueNumber] = useState('');
+      const [prNumber, setPrNumber] = useState('');
+      const [dryRun, setDryRun] = useState(false);
+      // Continue tab fields
+      const [contIssue, setContIssue] = useState('');
+      const [contPr, setContPr] = useState('');
+      const [contBranch, setContBranch] = useState('');
+
+      function handleSubmit() {
+        if (tab === 0) {
+          const num = parseInt(issueNumber, 10);
+          if (!num || num < 1) return;
+          onSubmit({ type: 'analyze', issueNumber: num, dryRun });
+        } else if (tab === 1) {
+          const num = parseInt(prNumber, 10);
+          if (!num || num < 1) return;
+          onSubmit({ type: 'review', prNumber: num });
+        } else if (tab === 2) {
+          const inum = parseInt(contIssue, 10);
+          const pnum = parseInt(contPr, 10);
+          if (!inum || inum < 1 || !pnum || pnum < 1 || !contBranch.trim()) return;
+          onSubmit({ type: 'continue', issueNumber: inum, prNumber: pnum, branchName: contBranch.trim() });
+        }
+        setIssueNumber('');
+        setPrNumber('');
+        setDryRun(false);
+        setContIssue('');
+        setContPr('');
+        setContBranch('');
+        onClose();
+      }
+
+      // Auto-fill branch name from issue number
+      function handleContIssueChange(val) {
+        setContIssue(val);
+        const num = parseInt(val, 10);
+        if (num > 0 && !contBranch) {
+          setContBranch(`issue-${num}-`);
+        }
+      }
+
+      return h(Dialog, { open, onClose, maxWidth: 'xs', fullWidth: true, PaperProps: { sx: { background: '#16213e' } } },
+        h(DialogTitle, null, 'Start New Process'),
+        h(DialogContent, null,
+          h(Tabs, { value: tab, onChange: (_, v) => setTab(v), sx: { mb: 2 } },
+            h(Tab, { label: 'Analyze Issue' }),
+            h(Tab, { label: 'Review PR' }),
+            h(Tab, { label: 'Continue' }),
+          ),
+          tab === 0
+            ? h(Box, null,
+                h(TextField, {
+                  label: 'Issue Number',
+                  type: 'number',
+                  fullWidth: true,
+                  value: issueNumber,
+                  onChange: (e) => setIssueNumber(e.target.value),
+                  sx: { mb: 2 },
+                  autoFocus: true,
+                }),
+                h(FormControlLabel, {
+                  control: h(Checkbox, { checked: dryRun, onChange: (e) => setDryRun(e.target.checked) }),
+                  label: 'Dry run (skip GitHub writes)',
+                }),
+              )
+            : tab === 1
+              ? h(TextField, {
+                  label: 'PR Number',
+                  type: 'number',
+                  fullWidth: true,
+                  value: prNumber,
+                  onChange: (e) => setPrNumber(e.target.value),
+                  autoFocus: true,
+                })
+              : h(Box, null,
+                  h(Typography, { variant: 'body2', color: 'text.secondary', sx: { mb: 2 } },
+                    'Resume the review \u2192 fix cycle on an existing PR. The architect will skip the issuer and initial coder steps.'
+                  ),
+                  h(TextField, {
+                    label: 'Issue Number',
+                    type: 'number',
+                    fullWidth: true,
+                    value: contIssue,
+                    onChange: (e) => handleContIssueChange(e.target.value),
+                    sx: { mb: 2 },
+                    autoFocus: true,
+                  }),
+                  h(TextField, {
+                    label: 'PR Number',
+                    type: 'number',
+                    fullWidth: true,
+                    value: contPr,
+                    onChange: (e) => setContPr(e.target.value),
+                    sx: { mb: 2 },
+                  }),
+                  h(TextField, {
+                    label: 'Branch Name',
+                    fullWidth: true,
+                    value: contBranch,
+                    onChange: (e) => setContBranch(e.target.value),
+                    placeholder: 'e.g. issue-20-fix-validation',
+                    helperText: 'The existing branch for this PR',
+                  }),
+                ),
+        ),
+        h(DialogActions, null,
+          h(Button, { onClick: onClose }, 'Cancel'),
+          h(Button, { variant: 'contained', onClick: handleSubmit },
+            tab === 2 ? 'Continue' : 'Start'
+          ),
+        ),
+      );
+    }
+
+    // ── App ────────────────────────────────────────────────────────────────────
+
+    function App() {
+      const [processes, setProcesses] = useState([]);
+      const [history, setHistory] = useState(null);
+      const [status, setStatus] = useState(null);
+      const [tab, setTab] = useState(0);
+      const [selectedProc, setSelectedProc] = useState(null);
+      const [drawerOpen, setDrawerOpen] = useState(false);
+      const [fullPageView, setFullPageView] = useState(false);
+      const [dialogOpen, setDialogOpen] = useState(false);
+      const [processLogs, setProcessLogs] = useState({});
+
+      // Fetch initial data
+      useEffect(() => {
+        fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {});
+        fetch('/api/processes').then(r => r.json()).then(setProcesses).catch(() => {});
+        fetch('/api/history').then(r => r.json()).then(setHistory).catch(() => {});
+      }, []);
+
+      // SSE connection with auto-reconnect
+      useEffect(() => {
+        let es;
+        let retryDelay = 1000;
+
+        function connect() {
+          es = new EventSource('/api/events');
+
+          es.onopen = () => { retryDelay = 1000; };
+
+          es.onmessage = (msg) => {
+            let event;
+            try { event = JSON.parse(msg.data); } catch { return; }
+
+            if (event.type === 'heartbeat' || event.type === 'connected') return;
+
+            if (event.type === 'process_log' && event.logLine) {
+              setProcessLogs(prev => {
+                const id = event.process.id;
+                const existing = prev[id] || [];
+                return { ...prev, [id]: [...existing, event.logLine] };
+              });
+              return;
+            }
+
+            // For other events, update the process list
+            if (event.process) {
+              setProcesses(prev => {
+                const idx = prev.findIndex(p => p.id === event.process.id);
+                if (idx >= 0) {
+                  const copy = [...prev];
+                  copy[idx] = event.process;
+                  return copy;
+                }
+                return [event.process, ...prev];
+              });
+
+              // Update selected process if it's the one being viewed
+              setSelectedProc(prev => {
+                if (prev && prev.id === event.process.id) {
+                  return event.process;
+                }
+                return prev;
+              });
+            }
+          };
+
+          es.onerror = () => {
+            es.close();
+            setTimeout(connect, retryDelay);
+            retryDelay = Math.min(retryDelay * 2, 30000);
+          };
+        }
+
+        connect();
+        return () => { if (es) es.close(); };
+      }, []);
+
+      // When selecting a process, fetch its full data (including existing logs)
+      function handleSelect(proc) {
+        setSelectedProc(proc);
+        if (!fullPageView) setDrawerOpen(true);
+        else setFullPageView(true);
+        fetch(`/api/processes/${proc.id}`)
+          .then(r => r.json())
+          .then(full => {
+            setSelectedProc(full);
+            if (full.logs && full.logs.length > 0) {
+              setProcessLogs(prev => ({ ...prev, [full.id]: full.logs }));
+            }
+          })
+          .catch(() => {});
+      }
+
+      function handleToggleFullPage() {
+        if (fullPageView) {
+          // Switch to drawer
+          setFullPageView(false);
+          setDrawerOpen(true);
+        } else {
+          // Switch to full page
+          setDrawerOpen(false);
+          setFullPageView(true);
+        }
+      }
+
+      function handleBackToList() {
+        setFullPageView(false);
+        setSelectedProc(null);
+      }
+
+      async function handleCancel(id) {
+        await fetch(`/api/processes/${id}`, { method: 'DELETE' }).catch(() => {});
+      }
+
+      async function handleNewProcess({ type, issueNumber, prNumber, branchName, dryRun }) {
+        const urlMap = {
+          analyze: '/api/processes/analyze',
+          review: '/api/processes/review',
+          continue: '/api/processes/continue',
+        };
+        const url = urlMap[type];
+        let body;
+        if (type === 'analyze') body = { issueNumber, dryRun };
+        else if (type === 'review') body = { prNumber };
+        else body = { issueNumber, prNumber, branchName };
+
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (res.ok) {
+            const proc = await res.json();
+            setProcesses(prev => [proc, ...prev]);
+          }
+        } catch {}
+      }
+
+      const selectedLogs = selectedProc ? (processLogs[selectedProc.id] || []) : [];
+
+      return h(ThemeProvider, { theme },
+        h(CssBaseline, null),
+
+        // AppBar
+        h(AppBar, { position: 'static', sx: { background: '#16213e', borderBottom: '1px solid #0f3460' } },
+          h(Toolbar, null,
+            h(Typography, { variant: 'h6', sx: { flexGrow: 0, mr: 2, fontWeight: 600 } }, 'Deep Agents Dashboard'),
+            status
+              ? h(Chip, {
+                  label: `${status.owner}/${status.repo}`,
+                  size: 'small',
+                  variant: 'outlined',
+                  sx: { mr: 2, borderColor: '#0f3460' },
+                })
+              : null,
+            h(Box, { sx: { flexGrow: 1 } }),
+            status
+              ? h(Chip, {
+                  label: `${status.runningCount} running`,
+                  size: 'small',
+                  color: status.runningCount > 0 ? 'info' : 'default',
+                  sx: { fontWeight: 500 },
+                })
+              : null,
+          ),
+        ),
+
+        // Main content
+        h(Box, { sx: { maxWidth: 1200, mx: 'auto', p: 3 } },
+          fullPageView && selectedProc
+            ? h(ProcessDetailFullPage, {
+                process: selectedProc,
+                onCancel: handleCancel,
+                onBack: handleBackToList,
+                logs: selectedLogs,
+                onToggleFullPage: handleToggleFullPage,
+              })
+            : h(Fragment, null,
+                h(Tabs, { value: tab, onChange: (_, v) => setTab(v), sx: { mb: 2 } },
+                  h(Tab, { label: 'Processes' }),
+                  h(Tab, { label: 'History' }),
+                ),
+                tab === 0
+                  ? h(ProcessesTable, { processes, onSelect: handleSelect, onCancel: handleCancel })
+                  : h(HistoryPanel, { history }),
+              ),
+        ),
+
+        // FAB (hide in full page view)
+        !fullPageView
+          ? h(Fab, {
+              color: 'primary',
+              sx: { position: 'fixed', bottom: 24, right: 24 },
+              onClick: () => setDialogOpen(true),
+            }, '+')
+          : null,
+
+        // Detail drawer (only when not in full page mode)
+        !fullPageView
+          ? h(ProcessDetailDrawer, {
+              process: selectedProc,
+              open: drawerOpen,
+              onClose: () => setDrawerOpen(false),
+              onCancel: handleCancel,
+              logs: selectedLogs,
+              onToggleFullPage: handleToggleFullPage,
+            })
+          : null,
+
+        // New process dialog
+        h(NewProcessDialog, {
+          open: dialogOpen,
+          onClose: () => setDialogOpen(false),
+          onSubmit: handleNewProcess,
+        }),
+      );
+    }
+
+    // ── Mount ──────────────────────────────────────────────────────────────────
+
+    createRoot(document.getElementById('root')).render(h(App));
+  </script>
+</body>
+</html>

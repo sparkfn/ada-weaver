@@ -35,6 +35,61 @@ export function logAgentEvent(agent: string, action: string, detail?: string): v
   console.log(`[${timestamp}] \u2500\u2500\u2500 ${agent.toUpperCase()} ${action} \u2500\u2500\u2500${detailStr}`);
 }
 
+// ── ANSI colours for terminal diff output ────────────────────────────────────
+
+const RESET = '\x1b[0m';
+const RED = '\x1b[31m';
+const GREEN = '\x1b[32m';
+const YELLOW = '\x1b[33m';
+const CYAN = '\x1b[36m';
+const DIM = '\x1b[2m';
+
+/**
+ * Log a unified diff to the console with GitHub-style ANSI colouring.
+ *
+ * - File headers (`diff --git`, `---`, `+++`) → cyan
+ * - Hunk headers (`@@`)                       → yellow
+ * - Additions (`+`)                           → green
+ * - Deletions (`-`)                           → red
+ * - Context lines                             → dim
+ *
+ * Large diffs are capped at `maxLines` (default 200) to avoid flooding the
+ * terminal.
+ */
+export function logDiff(diff: string, maxLines = 200): void {
+  const lines = diff.split('\n');
+  const capped = lines.length > maxLines;
+  const display = capped ? lines.slice(0, maxLines) : lines;
+
+  console.log('');
+  console.log(`${CYAN}┌${'─'.repeat(58)}┐${RESET}`);
+  console.log(`${CYAN}│${RESET}  📝 Code Changes (diff)${' '.repeat(33)}${CYAN}│${RESET}`);
+  console.log(`${CYAN}└${'─'.repeat(58)}┘${RESET}`);
+
+  for (const line of display) {
+    if (line.startsWith('diff --git')) {
+      // File boundary — blank line then header
+      console.log('');
+      console.log(`${CYAN}${line}${RESET}`);
+    } else if (line.startsWith('---') || line.startsWith('+++')) {
+      console.log(`${CYAN}${line}${RESET}`);
+    } else if (line.startsWith('@@')) {
+      console.log(`${YELLOW}${line}${RESET}`);
+    } else if (line.startsWith('+')) {
+      console.log(`${GREEN}${line}${RESET}`);
+    } else if (line.startsWith('-')) {
+      console.log(`${RED}${line}${RESET}`);
+    } else {
+      console.log(`${DIM}${line}${RESET}`);
+    }
+  }
+
+  if (capped) {
+    console.log(`\n${YELLOW}... diff truncated (showing ${maxLines} of ${lines.length} lines)${RESET}`);
+  }
+  console.log('');
+}
+
 /**
  * Wrap a LangChain tool with structured logging.
  *

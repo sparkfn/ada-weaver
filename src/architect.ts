@@ -25,10 +25,11 @@ import {
   createCheckCiStatusTool,
   createDryRunCheckCiStatusTool,
 } from './github-tools.js';
-import { formatDuration, logAgentEvent } from './logger.js';
+import { formatDuration, logAgentEvent, logDiff } from './logger.js';
 import { buildReviewerSystemPrompt } from './reviewer-agent.js';
 import { findPrForIssue } from './core.js';
 import type { Octokit } from 'octokit';
+import type { ProgressUpdate } from './process-manager.js';
 
 // ── Result interface ────────────────────────────────────────────────────────
 
@@ -119,24 +120,55 @@ export function createCoderSubagent(
 
 Your job is to implement changes based on the Architect's instructions.
 
+IMPORTANT: You MUST complete the PLANNING PHASE before writing any code.
+
+═══════════════════════════════════════
+PHASE 1: PLANNING (mandatory, do this FIRST)
+═══════════════════════════════════════
+
+Before making ANY changes, you must:
+1. Use list_repo_files to understand the project structure
+2. Use read_repo_file to read ALL files relevant to the task (files mentioned by the Architect + related files)
+3. Identify existing patterns, conventions, imports, and dependencies
+4. Produce an EXECUTION PLAN as a numbered list:
+   - Which files to create or modify, and in what order
+   - For each file: what specific changes to make and why
+   - What existing patterns to follow (naming, structure, imports)
+   - Dependencies between changes (e.g. "create utility before using it in handler")
+   - If tests are requested: which test patterns to follow, what to cover
+
+Output your plan clearly before proceeding. Example:
+  "EXECUTION PLAN:
+   1. Modify src/validator.ts — add amountToPay range check after line 45, following the existing validateField() pattern
+   2. Modify src/types.ts — add PaymentValidationError to the error union type
+   3. Create tests/validator.test.ts — test valid amounts, zero, negative, and overflow cases using the existing vitest + describe/it pattern
+   4. Update src/handler.ts — wire the new validation into the payment flow at the processPayment() entry point"
+
+Do NOT skip the planning phase. Do NOT start creating branches or committing files until you have a plan.
+
+═══════════════════════════════════════
+PHASE 2: EXECUTION
+═══════════════════════════════════════
+
 WORKFLOW FOR NEW ISSUES:
-1. Post a summary comment on the issue using comment_on_issue
+1. Post a summary comment on the issue using comment_on_issue (include your execution plan)
 2. Create a branch named issue-<number>-<short-description> using create_branch
    - Use the from_branch parameter if the Architect specifies a base branch (e.g. "develop", "feature/x")
    - If no base branch is specified, it defaults to "main"
-3. Use create_or_update_file to commit your proposed changes to the branch
+3. Execute your plan: use create_or_update_file to commit changes in the order specified
    - Write the FULL file content (not a diff) — the tool replaces the entire file
    - Each call commits one file. Make multiple calls for multi-file changes.
-4. Self-review: use read_repo_file to read back each committed file and verify correctness
+4. Self-review: use read_repo_file to read back each committed file and verify correctness against your plan
 5. Open a draft PR with title "Fix #<number>: <description>" using create_pull_request
    - If a base branch was specified, set the base parameter to match (e.g. base: "develop")
    - Body must contain "Closes #<number>" on its own line
-   - Include a "## Self-Review" section noting what you checked
+   - Include your execution plan and a "## Self-Review" section noting what you checked
 
 WORKFLOW FOR FIX ITERATIONS (when told to fix reviewer feedback):
 - The branch and PR ALREADY EXIST. Do NOT create new ones.
 - Do NOT post a new comment on the issue.
-- Read the current files from the specified branch, apply fixes, and commit to the same branch.
+- Still plan first: read the current files, understand the feedback, then list the specific fixes.
+- Apply fixes and commit to the same branch.
 - Use read_repo_file to verify your changes after committing.
 
 CONSTRAINTS:
@@ -336,15 +368,24 @@ export function getMaxIterations(config: Config): number {
  * 3. After completion, discovers PR via findPrForIssue (GitHub API)
  * 4. Returns ArchitectResult
  */
+export interface ContinueContext {
+  prNumber: number;
+  branchName: string;
+}
+
 export async function runArchitect(
   config: Config,
   issueNumber: number,
-  options: { dryRun?: boolean } = {},
+  options: { dryRun?: boolean; onProgress?: (update: ProgressUpdate) => void; signal?: AbortSignal; continueContext?: ContinueContext } = {},
 ): Promise<ArchitectResult> {
   const maxIterations = getMaxIterations(config);
 
   console.log(`\u{2705} Config loaded: ${config.github.owner}/${config.github.repo}`);
-  console.log(`\u{1F3D7}\uFE0F  Architect processing issue #${issueNumber} (max ${maxIterations} review iterations)`);
+  if (options.continueContext) {
+    console.log(`\u{1F504} Continuing issue #${issueNumber} — PR #${options.continueContext.prNumber} on branch ${options.continueContext.branchName}`);
+  } else {
+    console.log(`\u{1F3D7}\uFE0F  Architect processing issue #${issueNumber} (max ${maxIterations} review iterations)`);
+  }
   if (options.dryRun) {
     console.log('\u{1F9EA} DRY RUN MODE -- Coder subagent will skip GitHub writes');
   }
@@ -352,7 +393,24 @@ export async function runArchitect(
 
   const architect = createArchitect(config, { dryRun: options.dryRun, maxIterations });
 
-  const userMessage = `Process issue #${issueNumber}. Delegate to your team to understand, implement, and review a fix for this issue.`;
+  // Octokit client for diff fetching after coder completes
+  const { owner, repo } = config.github;
+  const octokit = createGitHubClient(getAuthFromConfig(config.github));
+
+  let userMessage: string;
+  if (options.continueContext) {
+    const { prNumber, branchName } = options.continueContext;
+    userMessage = `Continue working on issue #${issueNumber}. A PR #${prNumber} already exists on branch "${branchName}".
+
+Skip the issuer step — go directly to the reviewer:
+1. Delegate to reviewer: "Review PR #${prNumber}"
+2. If the reviewer's verdict is "needs_changes", delegate to coder with the feedback: "Fix the feedback on branch ${branchName} for PR #${prNumber}. Do NOT create a new branch or PR."
+3. Then delegate to reviewer again.
+4. Repeat the review→fix cycle up to the iteration limit.
+5. Report the final outcome.`;
+  } else {
+    userMessage = `Process issue #${issueNumber}. Delegate to your team to understand, implement, and review a fix for this issue.`;
+  }
 
   console.log('='.repeat(60));
 
@@ -371,8 +429,18 @@ export async function runArchitect(
   );
 
   for await (const ev of stream) {
+    if (options.signal?.aborted) break;
+
     if (ev.event === 'on_tool_start' && ev.name === 'task') {
-      const input = ev.data?.input;
+      // ev.data.input may be a parsed object OR a serialised JSON string
+      // depending on the LangGraph / deepagents version — handle both.
+      let input: Record<string, any> | undefined;
+      const raw = ev.data?.input;
+      if (raw && typeof raw === 'object') {
+        input = raw;
+      } else if (typeof raw === 'string') {
+        try { input = JSON.parse(raw); } catch { /* keep undefined */ }
+      }
       const subagentType: string = input?.subagent_type ?? 'unknown';
       const description: string = input?.description ?? '';
 
@@ -391,11 +459,60 @@ export async function runArchitect(
       activeLabel = label;
 
       logAgentEvent(subagentType, `started${label}`, description);
+      options.onProgress?.({
+        phase: subagentType,
+        action: 'started',
+        iteration: reviewerCount || coderFixCount || undefined,
+        maxIterations,
+        detail: description,
+      });
     } else if (ev.event === 'on_tool_end' && ev.name === 'task') {
       if (activeSubagent) {
         const duration = formatDuration(performance.now() - activeStartTime);
 
         logAgentEvent(activeSubagent, `completed${activeLabel} (${duration})`);
+        options.onProgress?.({
+          phase: activeSubagent,
+          action: 'completed',
+          iteration: reviewerCount || coderFixCount || undefined,
+          maxIterations,
+        });
+
+        // After the coder completes, fetch and display the PR diff
+        if (activeSubagent === 'coder') {
+          try {
+            // Extract PR number from tool output or find via API
+            let diffPrNumber: number | undefined;
+            const output = ev.data?.output;
+            const outputStr = typeof output === 'string' ? output : JSON.stringify(output ?? '');
+            const prMatch = outputStr.match(/PR\s*#(\d+)|pull\s*request\s*#?(\d+)|pull_number['":\s]+(\d+)/i);
+            if (prMatch) {
+              diffPrNumber = parseInt(prMatch[1] || prMatch[2] || prMatch[3], 10);
+            }
+            if (!diffPrNumber && options.continueContext) {
+              diffPrNumber = options.continueContext.prNumber;
+            }
+            if (!diffPrNumber) {
+              const prInfo = await findPrForIssue(config, issueNumber);
+              diffPrNumber = prInfo?.prNumber;
+            }
+
+            if (diffPrNumber) {
+              const { data } = await octokit.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: diffPrNumber,
+                mediaType: { format: 'diff' },
+              });
+              const diff = data as unknown as string;
+              if (diff) {
+                logDiff(diff);
+              }
+            }
+          } catch (diffErr) {
+            console.warn(`\u{26A0}\uFE0F  Could not fetch diff after coder: ${diffErr}`);
+          }
+        }
 
         // After the first reviewer completes, subsequent coder calls are fix iterations
         if (activeSubagent === 'reviewer') {

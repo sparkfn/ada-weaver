@@ -8,6 +8,7 @@ import { runPollCycle, showStatus, retractIssue, requestShutdown } from './core.
 import { runArchitect } from './architect.js';
 import { startWebhookServer, startDialogServer } from './listener.js';
 import { runReviewSingle } from './reviewer-agent.js';
+import { startDashboardServer } from './dashboard.js';
 
 // ── Signal handlers for graceful shutdown ────────────────────────────────────
 
@@ -49,10 +50,12 @@ Usage: deepagents <command> [options]
 Commands:
   poll              Run a poll cycle: fetch, analyze, comment, branch, PR
   analyze           Analyze a single issue (Architect: understand, implement, review)
+  continue          Continue review/fix cycle on an existing PR for an issue
   review            Review a pull request (fetch diff, analyze, post review comment)
   retract           Undo agent actions on an issue (close PR, delete branch, delete comment)
   webhook           Start the HTTP webhook listener for GitHub events
   dialog            Start the interactive chat server (agent + human conversation)
+  dashboard         Start the web dashboard for managing agent processes
   kill              Force kill all running deepagents processes
   status            Show current polling state
   help              Show this help message
@@ -66,6 +69,11 @@ Options for 'analyze':
   --issue N         Issue number to analyze (required)
   --dry-run         Skip GitHub writes (comments, branches, PRs)
 
+Options for 'continue':
+  --issue N         Issue number (required)
+  --pr N            Existing PR number (required)
+  --branch NAME     Existing branch name (required)
+
 Options for 'review':
   --pr N            Pull request number to review (required)
 
@@ -75,6 +83,9 @@ Options for 'retract':
 Options for 'dialog':
   --port N          Port for the dialog server (default: 3001)
 
+Options for 'dashboard':
+  --port N          Port for the dashboard server (default: 3000)
+
 Examples:
   deepagents poll
   deepagents poll --dry-run
@@ -83,10 +94,13 @@ Examples:
   deepagents analyze --issue 42
   deepagents analyze --issue 42 --dry-run
   deepagents review --pr 10
+  deepagents continue --issue 20 --pr 21 --branch issue-20-fix
   deepagents retract --issue 42
   deepagents webhook
   deepagents dialog
   deepagents kill
+  deepagents dashboard
+  deepagents dashboard --port 8080
   deepagents dialog --port 8080
   deepagents status
 `.trim();
@@ -113,6 +127,8 @@ function parseArgs(argv: string[]): { command: string; flags: Record<string, str
       flags['pr'] = args[++i];
     } else if (arg === '--port' && i + 1 < args.length) {
       flags['port'] = args[++i];
+    } else if (arg === '--branch' && i + 1 < args.length) {
+      flags['branch'] = args[++i];
     } else {
       console.error(`Unknown option: ${arg}`);
       console.log(USAGE);
@@ -239,6 +255,50 @@ async function main() {
       break;
     }
 
+    case 'continue': {
+      const contIssueStr = flags['issue'];
+      const contPrStr = flags['pr'];
+      const contBranch = flags['branch'];
+
+      if (!contIssueStr || typeof contIssueStr !== 'string') {
+        console.error('--issue N is required for the continue command');
+        console.log('\nUsage: deepagents continue --issue 20 --pr 21 --branch issue-20-fix');
+        process.exit(1);
+      }
+      if (!contPrStr || typeof contPrStr !== 'string') {
+        console.error('--pr N is required for the continue command');
+        console.log('\nUsage: deepagents continue --issue 20 --pr 21 --branch issue-20-fix');
+        process.exit(1);
+      }
+      if (!contBranch || typeof contBranch !== 'string') {
+        console.error('--branch NAME is required for the continue command');
+        console.log('\nUsage: deepagents continue --issue 20 --pr 21 --branch issue-20-fix');
+        process.exit(1);
+      }
+
+      const contIssueNumber = parseInt(contIssueStr, 10);
+      const contPrNumber = parseInt(contPrStr, 10);
+      if (isNaN(contIssueNumber) || contIssueNumber < 1) {
+        console.error('--issue must be a positive integer');
+        process.exit(1);
+      }
+      if (isNaN(contPrNumber) || contPrNumber < 1) {
+        console.error('--pr must be a positive integer');
+        process.exit(1);
+      }
+
+      console.log('\u{1F916} Deep Agents Continue\n');
+      const contResult = await runArchitect(config, contIssueNumber, {
+        continueContext: { prNumber: contPrNumber, branchName: contBranch },
+      });
+
+      console.log('\n' + '\u{2500}'.repeat(60));
+      console.log('\u{1F4CB} Continue summary:');
+      console.log(`   Issue:   #${contResult.issueNumber}`);
+      console.log(`   PR:      ${contResult.prNumber ? `#${contResult.prNumber}` : 'none'}`);
+      break;
+    }
+
     case 'review': {
       const prStr = flags['pr'];
       if (!prStr || typeof prStr !== 'string') {
@@ -312,6 +372,21 @@ async function main() {
 
       console.log('\u{1F916} Deep Agents Interactive Dialog\n');
       activeServer = startDialogServer(config, port);
+      // Server runs until process is killed (SIGTERM/SIGINT)
+      break;
+    }
+
+    case 'dashboard': {
+      const dashPortStr = flags['port'];
+      const dashPort = typeof dashPortStr === 'string' ? parseInt(dashPortStr, 10) : 3000;
+
+      if (isNaN(dashPort) || dashPort < 1 || dashPort > 65535) {
+        console.error('--port must be a number between 1 and 65535');
+        process.exit(1);
+      }
+
+      console.log('\u{1F916} Deep Agents Dashboard\n');
+      activeServer = startDashboardServer(config, dashPort);
       // Server runs until process is killed (SIGTERM/SIGINT)
       break;
     }

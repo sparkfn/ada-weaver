@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { wrapWithLogging } from '../src/logger.js';
+import { wrapWithLogging, formatDuration, logAgentEvent } from '../src/logger.js';
 import {
   createDryRunBranchTool,
   createDryRunCommentTool,
@@ -135,5 +135,86 @@ describe('wrapWithLogging', () => {
     // Both should show count out of 20
     expect(toolLogs[0]).toContain('/20');
     expect(toolLogs[1]).toContain('/20');
+  });
+});
+
+// ── formatDuration ───────────────────────────────────────────────────────────
+
+describe('formatDuration', () => {
+  it('formats sub-second durations as milliseconds', () => {
+    expect(formatDuration(0)).toBe('0ms');
+    expect(formatDuration(450)).toBe('450ms');
+    expect(formatDuration(999)).toBe('999ms');
+  });
+
+  it('formats durations under 60s as seconds', () => {
+    expect(formatDuration(1000)).toBe('1s');
+    expect(formatDuration(13000)).toBe('13s');
+    expect(formatDuration(59499)).toBe('59s');
+  });
+
+  it('formats durations of 60s+ as minutes and seconds', () => {
+    expect(formatDuration(60000)).toBe('1m');
+    expect(formatDuration(125000)).toBe('2m 5s');
+    expect(formatDuration(180000)).toBe('3m');
+  });
+
+  it('rounds sub-second values to nearest millisecond', () => {
+    expect(formatDuration(123.7)).toBe('124ms');
+  });
+
+  it('rounds to nearest second for values >= 1000ms', () => {
+    expect(formatDuration(1499)).toBe('1s');
+    expect(formatDuration(1500)).toBe('2s');
+  });
+});
+
+// ── logAgentEvent ────────────────────────────────────────────────────────────
+
+describe('logAgentEvent', () => {
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  it('logs with timestamp, uppercased agent name, and action', () => {
+    logAgentEvent('coder', 'started');
+
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const msg = consoleSpy.mock.calls[0][0];
+    expect(msg).toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    expect(msg).toContain('CODER');
+    expect(msg).toContain('started');
+    expect(msg).toContain('\u2500\u2500\u2500');
+  });
+
+  it('includes truncated detail when provided', () => {
+    logAgentEvent('issuer', 'started', 'Analyze issue #42');
+
+    const msg = consoleSpy.mock.calls[0][0];
+    expect(msg).toContain('ISSUER');
+    expect(msg).toContain('"Analyze issue #42"');
+  });
+
+  it('truncates long details to 50 characters with ellipsis', () => {
+    const longDetail = 'A'.repeat(60);
+    logAgentEvent('reviewer', 'started', longDetail);
+
+    const msg = consoleSpy.mock.calls[0][0];
+    expect(msg).toContain('"' + 'A'.repeat(50) + '..."');
+  });
+
+  it('does not add detail section when detail is omitted', () => {
+    logAgentEvent('coder', 'completed (13s)');
+
+    const msg = consoleSpy.mock.calls[0][0];
+    // Should end with the trailing dashes, no quotes
+    expect(msg).not.toContain('"');
+    expect(msg).toContain('completed (13s)');
   });
 });

@@ -25,6 +25,7 @@ import {
   createCheckCiStatusTool,
   createDryRunCheckCiStatusTool,
 } from './github-tools.js';
+import { formatDuration, logAgentEvent } from './logger.js';
 import { buildReviewerSystemPrompt } from './reviewer-agent.js';
 import { findPrForIssue } from './core.js';
 import type { Octokit } from 'octokit';
@@ -327,8 +328,11 @@ export function getMaxIterations(config: Config): number {
 /**
  * Run the Architect supervisor on a single issue.
  *
+ * Uses streamEvents() to intercept subagent lifecycle events and log
+ * which agent is active + what phase/iteration the pipeline is in.
+ *
  * 1. Creates the Architect agent with subagents
- * 2. Invokes with "Process issue #N"
+ * 2. Streams events — logs subagent start/complete with iteration labels
  * 3. After completion, discovers PR via findPrForIssue (GitHub API)
  * 4. Returns ArchitectResult
  */
@@ -352,18 +356,67 @@ export async function runArchitect(
 
   console.log('='.repeat(60));
 
-  const result = await architect.invoke({
-    messages: [{ role: 'user', content: userMessage }],
-  });
+  // Subagent tracking state
+  let reviewerCount = 0;
+  let coderAfterReview = false;
+  let coderFixCount = 0;
+  let activeSubagent: string | null = null;
+  let activeStartTime = 0;
+  let activeLabel = '';
+  let lastResponse = '';
+
+  const stream = architect.streamEvents(
+    { messages: [{ role: 'user', content: userMessage }] },
+    { version: 'v2' },
+  );
+
+  for await (const ev of stream) {
+    if (ev.event === 'on_tool_start' && ev.name === 'task') {
+      const input = ev.data?.input;
+      const subagentType: string = input?.subagent_type ?? 'unknown';
+      const description: string = input?.description ?? '';
+
+      activeSubagent = subagentType;
+      activeStartTime = performance.now();
+
+      // Build iteration label
+      let label = '';
+      if (subagentType === 'reviewer') {
+        reviewerCount++;
+        label = ` [iteration ${reviewerCount}/${maxIterations}]`;
+      } else if (subagentType === 'coder' && coderAfterReview) {
+        coderFixCount++;
+        label = ` [fix iteration ${coderFixCount}]`;
+      }
+      activeLabel = label;
+
+      logAgentEvent(subagentType, `started${label}`, description);
+    } else if (ev.event === 'on_tool_end' && ev.name === 'task') {
+      if (activeSubagent) {
+        const duration = formatDuration(performance.now() - activeStartTime);
+
+        logAgentEvent(activeSubagent, `completed${activeLabel} (${duration})`);
+
+        // After the first reviewer completes, subsequent coder calls are fix iterations
+        if (activeSubagent === 'reviewer') {
+          coderAfterReview = true;
+        }
+
+        activeSubagent = null;
+        activeLabel = '';
+      }
+    } else if (ev.event === 'on_chat_model_end') {
+      const content = ev.data?.output?.content;
+      if (typeof content === 'string' && content) {
+        lastResponse = content;
+      }
+    }
+  }
 
   console.log('='.repeat(60));
   console.log('\n\u{2705} Architect completed!\n');
 
-  // Extract outcome from the Architect's final message
-  const lastMessage = result.messages[result.messages.length - 1];
-  const outcome = typeof lastMessage.content === 'string'
-    ? lastMessage.content
-    : JSON.stringify(lastMessage.content);
+  const outcome = lastResponse || 'No response captured from Architect.';
 
   console.log('\u{1F4DD} Architect Summary:');
   console.log(outcome);

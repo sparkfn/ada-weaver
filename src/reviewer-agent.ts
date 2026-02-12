@@ -188,6 +188,9 @@ export function createReviewerAgent(
 
 /**
  * Run the reviewer agent on a single PR.
+ *
+ * Uses streamEvents() to collect the final message via streaming,
+ * matching the pattern used by runArchitect and chatStream.
  */
 export async function runReviewSingle(
   config: Config,
@@ -205,17 +208,26 @@ export async function runReviewSingle(
 
   console.log('='.repeat(60));
 
-  const result = await agent.invoke({
-    messages: [{ role: 'user', content: userMessage }],
-  });
+  let lastResponse = '';
+
+  const stream = agent.streamEvents(
+    { messages: [{ role: 'user', content: userMessage }] },
+    { version: 'v2' },
+  );
+
+  for await (const ev of stream) {
+    if (ev.event === 'on_chat_model_end') {
+      const content = ev.data?.output?.content;
+      if (typeof content === 'string' && content) {
+        lastResponse = content;
+      }
+    }
+  }
 
   console.log('='.repeat(60));
   console.log('\n\u{2705} Review completed!\n');
 
-  const lastMessage = result.messages[result.messages.length - 1];
-  const content = typeof lastMessage.content === 'string'
-    ? lastMessage.content
-    : JSON.stringify(lastMessage.content);
+  const content = lastResponse || 'No response captured from reviewer.';
 
   console.log('\u{1F4DD} Agent Response:');
   console.log(content);

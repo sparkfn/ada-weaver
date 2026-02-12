@@ -9,6 +9,33 @@ function formatTime(date: Date): string {
 }
 
 /**
+ * Format milliseconds as a human-readable duration string.
+ *
+ * Examples: "450ms", "13s", "2m 5s", "3m"
+ */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+}
+
+/**
+ * Log an agent lifecycle event with timestamp and formatted details.
+ *
+ * Output: [HH:MM:SS] ─── AGENT action ─── "truncated detail..."
+ */
+export function logAgentEvent(agent: string, action: string, detail?: string): void {
+  const timestamp = formatTime(new Date());
+  const detailStr = detail
+    ? ` "${detail.slice(0, 50)}${detail.length > 50 ? '...' : ''}"`
+    : '';
+  console.log(`[${timestamp}] \u2500\u2500\u2500 ${agent.toUpperCase()} ${action} \u2500\u2500\u2500${detailStr}`);
+}
+
+/**
  * Wrap a LangChain tool with structured logging.
  *
  * Logs: timestamp, running tool count / limit, tool name, arguments, and duration.

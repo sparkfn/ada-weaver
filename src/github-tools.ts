@@ -1,0 +1,757 @@
+import { Octokit } from 'octokit';
+import { createAppAuth } from '@octokit/auth-app';
+import fs from 'fs';
+import { tool } from 'langchain';
+import { z } from 'zod';
+import { withRetry } from './utils.js';
+
+// ── Circuit breaker ─────────────────────────────────────────────────────────
+
+/**
+ * Shared counter for circuit breaker. Tracks total tool calls across all tools
+ * in a single agent run and throws when the limit is exceeded.
+ */
+export class ToolCallCounter {
+  private count = 0;
+  constructor(readonly limit: number) {}
+
+  increment(toolName: string): void {
+    this.count++;
+    if (this.count > this.limit) {
+      throw new CircuitBreakerError(
+        `Circuit breaker tripped: ${this.count} tool calls exceeded limit of ${this.limit}. ` +
+        `Last tool: ${toolName}. Stopping agent to prevent runaway execution.`,
+        this.count,
+        this.limit,
+      );
+    }
+  }
+
+  getCount(): number {
+    return this.count;
+  }
+}
+
+export class CircuitBreakerError extends Error {
+  constructor(
+    message: string,
+    public readonly callCount: number,
+    public readonly callLimit: number,
+  ) {
+    super(message);
+    this.name = 'CircuitBreakerError';
+  }
+}
+
+/**
+ * Wrap a LangChain tool with circuit breaker counting.
+ * Returns a new tool with the same name/schema that increments the shared counter before each call.
+ */
+export function wrapWithCircuitBreaker<T extends ReturnType<typeof tool>>(
+  wrappedTool: T,
+  counter: ToolCallCounter,
+): T {
+  const originalInvoke = wrappedTool.invoke.bind(wrappedTool);
+  wrappedTool.invoke = async (input: any, options?: any) => {
+    counter.increment(wrappedTool.name);
+    return originalInvoke(input, options);
+  };
+  return wrappedTool;
+}
+
+// ── Auth helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * GitHub App auth config (alternative to PAT).
+ */
+export interface GitHubAppAuth {
+  appId: number;
+  privateKeyPath: string;
+  installationId: number;
+}
+
+/**
+ * Extract the auth parameter from a config's github section.
+ * Returns a PAT string or GitHubAppAuth object, depending on what's configured.
+ */
+export function getAuthFromConfig(githubConfig: { token?: string; appId?: number; privateKeyPath?: string; installationId?: number }): string | GitHubAppAuth {
+  if (githubConfig.appId && githubConfig.privateKeyPath && githubConfig.installationId) {
+    return {
+      appId: githubConfig.appId,
+      privateKeyPath: githubConfig.privateKeyPath,
+      installationId: githubConfig.installationId,
+    };
+  }
+  return githubConfig.token!;
+}
+
+/**
+ * Create GitHub API client.
+ * Accepts either a PAT string or GitHub App auth config.
+ * When App auth is provided, uses @octokit/auth-app to generate installation tokens.
+ */
+export function createGitHubClient(auth: string | GitHubAppAuth) {
+  if (typeof auth === 'string') {
+    return new Octokit({ auth });
+  }
+
+  const privateKey = fs.readFileSync(auth.privateKeyPath, 'utf-8');
+  return new Octokit({
+    authStrategy: createAppAuth,
+    auth: {
+      appId: auth.appId,
+      privateKey,
+      installationId: auth.installationId,
+    },
+  });
+}
+
+/**
+ * Tool: Fetch open issues from GitHub repository
+ */
+export function createGitHubIssuesTool(owner: string, repo: string, octokit: Octokit, maxIssues?: number) {
+  return tool(
+    async ({ state = 'open', limit = 5, since }: { state?: 'open' | 'closed' | 'all'; limit?: number; since?: string }) => {
+      try {
+        const effectiveLimit = maxIssues ? Math.min(limit, maxIssues) : limit;
+        const sinceLabel = since ? ` updated since ${since}` : '';
+        console.log(`\u{1F4E5} Fetching ${state} issues from ${owner}/${repo}${sinceLabel}...`);
+        const params: Parameters<typeof octokit.rest.issues.listForRepo>[0] = {
+          owner, repo, state, per_page: effectiveLimit, sort: 'updated', direction: 'desc',
+        };
+        if (since) { params.since = since; }
+        const { data: issues } = await withRetry(() => octokit.rest.issues.listForRepo(params));
+        const formattedIssues = issues.map((issue) => ({
+          number: issue.number, title: issue.title, body: issue.body || '(no description)',
+          state: issue.state, created_at: issue.created_at, updated_at: issue.updated_at,
+          url: issue.html_url, labels: issue.labels.map((l) => l.name),
+        }));
+        return JSON.stringify(formattedIssues, null, 2);
+      } catch (error) {
+        return `Error fetching issues: ${error}`;
+      }
+    },
+    {
+      name: 'fetch_github_issues',
+      description: 'Fetch issues from a GitHub repository. Supports a "since" parameter for polling -- only returns issues updated after the given ISO 8601 timestamp.',
+      schema: z.object({
+        state: z.enum(['open', 'closed', 'all']).optional().describe('Issue state: open, closed, or all'),
+        limit: z.number().optional().default(5).describe('Maximum number of issues to return'),
+        since: z.string().optional().describe('ISO 8601 timestamp. Only issues updated after this date are returned.'),
+      }),
+    }
+  );
+}
+
+const BOT_COMMENT_MARKER = '<!-- deep-agent-analysis -->';
+
+export function createCommentOnIssueTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ issue_number, body }: { issue_number: number; body: string }) => {
+      try {
+        console.log(`\u{1F4AC} Commenting on issue #${issue_number} in ${owner}/${repo}...`);
+        const { data: existingComments } = await withRetry(() => octokit.rest.issues.listComments({
+          owner, repo, issue_number, per_page: 100,
+        }));
+        const alreadyCommented = existingComments.some((c) => c.body?.includes(BOT_COMMENT_MARKER));
+        if (alreadyCommented) {
+          console.log(`\u{26A0}\uFE0F  Skipping comment on issue #${issue_number} -- analysis comment already exists.`);
+          return JSON.stringify({ skipped: true, reason: 'Analysis comment already exists on this issue.', issue_number });
+        }
+        const markedBody = `${BOT_COMMENT_MARKER}\n${body}`;
+        const { data: comment } = await withRetry(() => octokit.rest.issues.createComment({
+          owner, repo, issue_number, body: markedBody,
+        }));
+        return JSON.stringify({ id: comment.id, html_url: comment.html_url, created_at: comment.created_at });
+      } catch (error) {
+        return `Error commenting on issue #${issue_number}: ${error}`;
+      }
+    },
+    {
+      name: 'comment_on_issue',
+      description: 'Post a comment on a GitHub issue. Use this to share analysis findings directly on the issue. Automatically skips if an analysis comment already exists (idempotent).',
+      schema: z.object({
+        issue_number: z.number().describe('The issue number to comment on'),
+        body: z.string().describe('The comment body (Markdown supported)'),
+      }),
+    }
+  );
+}
+
+export function createBranchTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ branch_name, from_branch = 'main' }: { branch_name: string; from_branch?: string }) => {
+      try {
+        console.log(`\u{1F33F} Creating branch '${branch_name}' from '${from_branch}' in ${owner}/${repo}...`);
+        try {
+          await withRetry(() => octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch_name}` }));
+          console.log(`\u{26A0}\uFE0F  Skipping branch creation -- '${branch_name}' already exists.`);
+          return JSON.stringify({ skipped: true, reason: `Branch '${branch_name}' already exists.`, branch: branch_name, url: `https://github.com/${owner}/${repo}/tree/${branch_name}` });
+        } catch (e: unknown) {
+          const status = (e as { status?: number }).status;
+          if (status !== 404) throw e;
+        }
+        const { data: ref } = await withRetry(() => octokit.rest.git.getRef({ owner, repo, ref: `heads/${from_branch}` }));
+        const sha = ref.object.sha;
+        await withRetry(() => octokit.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch_name}`, sha }));
+        return JSON.stringify({ branch: branch_name, sha, url: `https://github.com/${owner}/${repo}/tree/${branch_name}` });
+      } catch (error) {
+        return `Error creating branch '${branch_name}': ${error}`;
+      }
+    },
+    {
+      name: 'create_branch',
+      description: 'Create a new Git branch in the repository. Used to prepare a feature branch before opening a pull request. Automatically skips if the branch already exists (idempotent).',
+      schema: z.object({
+        branch_name: z.string().describe('Name for the new branch (e.g., "issue-42-fix-login")'),
+        from_branch: z.string().optional().default('main').describe('Branch to create from (default: main)'),
+      }),
+    }
+  );
+}
+
+export function createPullRequestTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ title, body, head, base = 'main' }: { title: string; body: string; head: string; base?: string }) => {
+      try {
+        console.log(`\u{1F4DD} Creating draft PR '${title}' in ${owner}/${repo}...`);
+        const { data: existingPRs } = await withRetry(() => octokit.rest.pulls.list({
+          owner, repo, head: `${owner}:${head}`, base, state: 'open',
+        }));
+        if (existingPRs.length > 0) {
+          const existing = existingPRs[0];
+          console.log(`\u{26A0}\uFE0F  Skipping PR creation -- open PR #${existing.number} already exists for branch '${head}'.`);
+          return JSON.stringify({ skipped: true, reason: `Open PR #${existing.number} already exists for branch '${head}'.`, number: existing.number, html_url: existing.html_url });
+        }
+        const { data: pr } = await withRetry(() => octokit.rest.pulls.create({
+          owner, repo, title, body, head, base, draft: true,
+        }));
+        return JSON.stringify({ number: pr.number, html_url: pr.html_url, state: pr.state, draft: pr.draft });
+      } catch (error) {
+        return `Error creating pull request: ${error}`;
+      }
+    },
+    {
+      name: 'create_pull_request',
+      description: 'Open a draft pull request. The PR should reference the issue number in the title and body. Always creates a draft PR -- never auto-merges. Automatically skips if an open PR already exists for the same branch (idempotent).',
+      schema: z.object({
+        title: z.string().describe('PR title (e.g., "Fix #42: Resolve login timeout")'),
+        body: z.string().describe('PR description with analysis and approach. Include "Closes #N" to link the issue.'),
+        head: z.string().describe('The branch containing changes (e.g., "issue-42-fix-login")'),
+        base: z.string().optional().default('main').describe('The branch to merge into (default: main)'),
+      }),
+    }
+  );
+}
+
+export function createListRepoFilesTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ path = '', branch = 'main' }: { path?: string; branch?: string }) => {
+      try {
+        console.log(`\u{1F4C2} Listing files in ${owner}/${repo}${path ? ` under ${path}` : ''}...`);
+        const { data: ref } = await withRetry(() => octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` }));
+        const commitSha = ref.object.sha;
+        const { data: commit } = await withRetry(() => octokit.rest.git.getCommit({ owner, repo, commit_sha: commitSha }));
+        const treeSha = commit.tree.sha;
+        const { data: tree } = await withRetry(() => octokit.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: 'true' }));
+        const prefix = path ? (path.endsWith('/') ? path : path + '/') : '';
+        const files = tree.tree
+          .filter((item) => item.type === 'blob')
+          .filter((item) => !prefix || item.path?.startsWith(prefix))
+          .map((item) => ({ path: item.path, size: item.size }));
+        if (tree.truncated) {
+          return JSON.stringify({ files, warning: 'Tree was truncated by GitHub API (repo has too many files). Results may be incomplete.', total: files.length }, null, 2);
+        }
+        return JSON.stringify({ files, total: files.length }, null, 2);
+      } catch (error) {
+        return `Error listing files: ${error}`;
+      }
+    },
+    {
+      name: 'list_repo_files',
+      description: 'List all files in the repository. Returns file paths and sizes. Use this to understand the repo structure before reading specific files. Supports optional path prefix filtering (e.g., "src/" to list only source files).',
+      schema: z.object({
+        path: z.string().optional().default('').describe('Filter files by path prefix (e.g., "src/", "test/"). Empty string returns all files.'),
+        branch: z.string().optional().default('main').describe('Branch to list files from (default: main)'),
+      }),
+    }
+  );
+}
+
+export function createReadRepoFileTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ path, branch = 'main' }: { path: string; branch?: string }) => {
+      try {
+        console.log(`\u{1F4D6} Reading ${path} from ${owner}/${repo} (${branch})...`);
+        const { data } = await withRetry(() => octokit.rest.repos.getContent({ owner, repo, path, ref: branch }));
+        if (Array.isArray(data)) {
+          return `Error: '${path}' is a directory, not a file. Use list_repo_files to browse directories.`;
+        }
+        if (data.type !== 'file') {
+          return `Error: '${path}' is a ${data.type}, not a file.`;
+        }
+        if (!data.content) {
+          return `Error: '${path}' has no content (file may be too large for the Content API -- GitHub limit is 1MB).`;
+        }
+        const fullContent = Buffer.from(data.content, 'base64').toString('utf-8');
+        const MAX_LINES = 500;
+        const lines = fullContent.split('\n');
+        const truncated = lines.length > MAX_LINES;
+        const content = truncated ? lines.slice(0, MAX_LINES).join('\n') : fullContent;
+        const result: Record<string, unknown> = { path: data.path, size: data.size, sha: data.sha, content };
+        if (truncated) {
+          result.truncated = true;
+          result.total_lines = lines.length;
+          result.shown_lines = MAX_LINES;
+          result.note = `File has ${lines.length} lines. Only the first ${MAX_LINES} are shown. Use list_repo_files to find smaller, more targeted files.`;
+        }
+        return JSON.stringify(result, null, 2);
+      } catch (error) {
+        return `Error reading file '${path}': ${error}`;
+      }
+    },
+    {
+      name: 'read_repo_file',
+      description: 'Read the contents of a single file from the repository. Returns the file content as text. Files over 500 lines are truncated. Use list_repo_files first to find the correct file path. Limited to files under 1MB.',
+      schema: z.object({
+        path: z.string().describe('Full path to the file in the repo (e.g., "src/index.ts", "README.md")'),
+        branch: z.string().optional().default('main').describe('Branch to read from (default: main)'),
+      }),
+    }
+  );
+}
+
+export function createOrUpdateFileTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ path, content, message, branch }: { path: string; content: string; message: string; branch: string }) => {
+      try {
+        console.log(`\u{1F4DD} Committing ${path} to ${branch} in ${owner}/${repo}...`);
+        let existingSha: string | undefined;
+        try {
+          const { data } = await withRetry(() => octokit.rest.repos.getContent({ owner, repo, path, ref: branch }));
+          if (!Array.isArray(data) && data.type === 'file') { existingSha = data.sha; }
+        } catch (e: unknown) {
+          const status = (e as { status?: number }).status;
+          if (status !== 404) throw e;
+        }
+        const { data: result } = await withRetry(() => octokit.rest.repos.createOrUpdateFileContents({
+          owner, repo, path, message, content: Buffer.from(content).toString('base64'), branch,
+          ...(existingSha ? { sha: existingSha } : {}),
+        }));
+        return JSON.stringify({ path, sha: result.content?.sha, commit_sha: result.commit.sha, html_url: result.content?.html_url });
+      } catch (error) {
+        return `Error committing file '${path}': ${error}`;
+      }
+    },
+    {
+      name: 'create_or_update_file',
+      description: 'Create or update a file on a branch via the GitHub API. Each call creates one commit. Use this to push proposed code changes to a feature branch before opening a PR.',
+      schema: z.object({
+        path: z.string().describe('File path in the repo (e.g., "README.md", "src/utils.ts")'),
+        content: z.string().describe('The full file content to write'),
+        message: z.string().describe('Git commit message for this change'),
+        branch: z.string().describe('The branch to commit to (e.g., "issue-1-improve-readme")'),
+      }),
+    }
+  );
+}
+
+// ── Sub-issue tools ─────────────────────────────────────────────────────────
+
+/**
+ * Tool: Fetch sub-issues for a given issue.
+ * Uses octokit.request() because the sub-issues endpoint isn't in the typed REST client yet.
+ */
+export function createFetchSubIssuesTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ issue_number }: { issue_number: number }) => {
+      try {
+        console.log(`🔗 Fetching sub-issues for #${issue_number} in ${owner}/${repo}...`);
+        const { data: subIssues } = await withRetry(() => octokit.request(
+          'GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues',
+          { owner, repo, issue_number, per_page: 100 },
+        ));
+        const formatted = (subIssues as any[]).map((si: any) => ({
+          id: si.id,
+          number: si.number,
+          title: si.title,
+          body: si.body || '(no description)',
+          state: si.state,
+          labels: (si.labels || []).map((l: any) => typeof l === 'string' ? l : l.name ?? ''),
+        }));
+        return JSON.stringify(formatted, null, 2);
+      } catch (error) {
+        return `Error fetching sub-issues for #${issue_number}: ${error}`;
+      }
+    },
+    {
+      name: 'fetch_sub_issues',
+      description: 'Fetch all sub-issues (children) of a GitHub issue. Returns an array of sub-issues with id, number, title, body, state, and labels.',
+      schema: z.object({
+        issue_number: z.number().describe('The parent issue number to fetch sub-issues for'),
+      }),
+    }
+  );
+}
+
+/**
+ * Tool: Get the parent issue of a given issue.
+ * 404 is normal (means no parent), not an error.
+ */
+export function createGetParentIssueTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ issue_number }: { issue_number: number }) => {
+      try {
+        console.log(`🔗 Checking parent of #${issue_number} in ${owner}/${repo}...`);
+        const { data: parent } = await withRetry(() => octokit.request(
+          'GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues/parent',
+          { owner, repo, issue_number },
+        ));
+        const p = parent as any;
+        return JSON.stringify({
+          parent: {
+            id: p.id,
+            number: p.number,
+            title: p.title,
+            body: p.body || '(no description)',
+            state: p.state,
+            labels: (p.labels || []).map((l: any) => typeof l === 'string' ? l : l.name ?? ''),
+          },
+        }, null, 2);
+      } catch (error: unknown) {
+        const status = (error as { status?: number }).status;
+        if (status === 404) {
+          return JSON.stringify({ parent: null });
+        }
+        return `Error fetching parent of #${issue_number}: ${error}`;
+      }
+    },
+    {
+      name: 'get_parent_issue',
+      description: 'Get the parent issue of a sub-issue. Returns { parent: null } if the issue has no parent (is a top-level issue).',
+      schema: z.object({
+        issue_number: z.number().describe('The issue number to check for a parent'),
+      }),
+    }
+  );
+}
+
+/**
+ * Tool: Create a sub-issue (two-step: create issue, then link as sub-issue).
+ * Critical: uses newIssue.id (internal ID), NOT newIssue.number for linking.
+ */
+export function createCreateSubIssueTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ parent_issue_number, title, body, labels }: {
+      parent_issue_number: number;
+      title: string;
+      body: string;
+      labels?: string[];
+    }) => {
+      try {
+        console.log(`➕ Creating sub-issue under #${parent_issue_number} in ${owner}/${repo}...`);
+
+        // Step 1: Create the issue
+        const createParams: Parameters<typeof octokit.rest.issues.create>[0] = {
+          owner, repo, title, body,
+        };
+        if (labels && labels.length > 0) {
+          createParams.labels = labels;
+        }
+        const { data: newIssue } = await withRetry(() => octokit.rest.issues.create(createParams));
+
+        // Step 2: Link as sub-issue (uses internal ID, not issue number)
+        await withRetry(() => octokit.request(
+          'POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues',
+          { owner, repo, issue_number: parent_issue_number, sub_issue_id: newIssue.id },
+        ));
+
+        return JSON.stringify({
+          id: newIssue.id,
+          number: newIssue.number,
+          title: newIssue.title,
+          html_url: newIssue.html_url,
+          parent_issue_number,
+        });
+      } catch (error) {
+        return `Error creating sub-issue under #${parent_issue_number}: ${error}`;
+      }
+    },
+    {
+      name: 'create_sub_issue',
+      description: 'Create a new issue and link it as a sub-issue of a parent issue. Creates the issue first, then establishes the parent-child relationship.',
+      schema: z.object({
+        parent_issue_number: z.number().describe('The parent issue number to add the sub-issue to'),
+        title: z.string().describe('Title for the new sub-issue'),
+        body: z.string().describe('Body/description for the new sub-issue (Markdown supported)'),
+        labels: z.array(z.string()).optional().describe('Labels to apply to the new sub-issue'),
+      }),
+    }
+  );
+}
+
+// ── CI status tool ──────────────────────────────────────────────────────────
+
+/**
+ * Tool: Check CI status for a pull request.
+ * Gets the PR head SHA, then fetches check runs for that ref.
+ */
+export function createCheckCiStatusTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ pull_number }: { pull_number: number }) => {
+      try {
+        console.log(`🔍 Checking CI status for PR #${pull_number} in ${owner}/${repo}...`);
+
+        // Get PR head SHA
+        const { data: pr } = await withRetry(() => octokit.rest.pulls.get({ owner, repo, pull_number }));
+        const headSha = pr.head.sha;
+
+        // Fetch check runs for the head SHA
+        const { data: checkData } = await withRetry(() => octokit.rest.checks.listForRef({ owner, repo, ref: headSha }));
+        const checkRuns = checkData.check_runs;
+
+        if (checkRuns.length === 0) {
+          return JSON.stringify({ overall: 'no_checks', total: 0, completed: 0, failed: 0, checks: [] });
+        }
+
+        const checks = checkRuns.map((cr) => ({
+          name: cr.name,
+          status: cr.status,
+          conclusion: cr.conclusion,
+          output_summary: cr.output?.summary || null,
+        }));
+
+        const total = checkRuns.length;
+        const completed = checkRuns.filter((cr) => cr.status === 'completed').length;
+        const failed = checkRuns.filter((cr) =>
+          cr.status === 'completed' && (cr.conclusion === 'failure' || cr.conclusion === 'timed_out'),
+        ).length;
+
+        let overall: string;
+        if (completed < total) {
+          overall = 'in_progress';
+        } else if (failed > 0) {
+          overall = 'failure';
+        } else {
+          overall = 'success';
+        }
+
+        return JSON.stringify({ overall, total, completed, failed, checks });
+      } catch (error) {
+        return `Error checking CI status for PR #${pull_number}: ${error}`;
+      }
+    },
+    {
+      name: 'check_ci_status',
+      description: 'Check CI/check-run status for a pull request. Returns overall status (success, failure, in_progress, no_checks) and per-check details.',
+      schema: z.object({
+        pull_number: z.number().describe('The pull request number to check CI status for'),
+      }),
+    }
+  );
+}
+
+// ── Dry-run wrappers ────────────────────────────────────────────────────────
+
+export function createDryRunCommentTool() {
+  return tool(
+    async ({ issue_number, body }: { issue_number: number; body: string }) => {
+      const preview = body.length > 80 ? body.slice(0, 80) + '...' : body;
+      console.log(`DRY RUN -- would comment on issue #${issue_number}: ${preview}`);
+      return JSON.stringify({ dry_run: true, id: 0, html_url: `(dry-run) issue #${issue_number} comment`, created_at: new Date().toISOString() });
+    },
+    { name: 'comment_on_issue', description: 'Post a comment on a GitHub issue. (DRY RUN MODE: will log but not execute)', schema: z.object({ issue_number: z.number().describe('The issue number to comment on'), body: z.string().describe('The comment body (Markdown supported)') }) }
+  );
+}
+
+export function createDryRunBranchTool() {
+  return tool(
+    async ({ branch_name, from_branch = 'main' }: { branch_name: string; from_branch?: string }) => {
+      console.log(`DRY RUN -- would create branch '${branch_name}' from '${from_branch}'`);
+      return JSON.stringify({ dry_run: true, branch: branch_name, sha: '0000000000000000000000000000000000000000', url: `(dry-run) branch ${branch_name}` });
+    },
+    { name: 'create_branch', description: 'Create a new Git branch in the repository. (DRY RUN MODE: will log but not execute)', schema: z.object({ branch_name: z.string().describe('Name for the new branch'), from_branch: z.string().optional().default('main').describe('Branch to create from (default: main)') }) }
+  );
+}
+
+export function createDryRunPullRequestTool() {
+  return tool(
+    async ({ title, body, head, base = 'main' }: { title: string; body: string; head: string; base?: string }) => {
+      console.log(`DRY RUN -- would create draft PR '${title}' (${head} -> ${base})`);
+      return JSON.stringify({ dry_run: true, number: 0, html_url: `(dry-run) PR: ${title}`, state: 'open', draft: true });
+    },
+    { name: 'create_pull_request', description: 'Open a draft pull request. (DRY RUN MODE: will log but not execute)', schema: z.object({ title: z.string().describe('PR title'), body: z.string().describe('PR description'), head: z.string().describe('The branch containing changes'), base: z.string().optional().default('main').describe('The branch to merge into (default: main)') }) }
+  );
+}
+
+export function createDryRunCreateOrUpdateFileTool() {
+  return tool(
+    async ({ path, content, message, branch }: { path: string; content: string; message: string; branch: string }) => {
+      const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
+      console.log(`DRY RUN -- would commit ${path} to ${branch}: ${preview}`);
+      return JSON.stringify({ dry_run: true, path, sha: '0000000000000000000000000000000000000000', commit_sha: '0000000000000000000000000000000000000000', html_url: `(dry-run) ${path} on ${branch}` });
+    },
+    { name: 'create_or_update_file', description: 'Create or update a file on a branch. (DRY RUN MODE: will log but not execute)', schema: z.object({ path: z.string().describe('File path in the repo'), content: z.string().describe('The full file content to write'), message: z.string().describe('Git commit message'), branch: z.string().describe('The branch to commit to') }) }
+  );
+}
+
+export function createDryRunCheckCiStatusTool() {
+  return tool(
+    async ({ pull_number }: { pull_number: number }) => {
+      console.log(`DRY RUN -- would check CI status for PR #${pull_number}`);
+      return JSON.stringify({ dry_run: true, overall: 'success', checks: [] });
+    },
+    {
+      name: 'check_ci_status',
+      description: 'Check CI/check-run status for a pull request. (DRY RUN MODE: will log but not execute)',
+      schema: z.object({
+        pull_number: z.number().describe('The pull request number to check CI status for'),
+      }),
+    }
+  );
+}
+
+export function createDryRunCreateSubIssueTool() {
+  return tool(
+    async ({ parent_issue_number, title, body, labels }: {
+      parent_issue_number: number;
+      title: string;
+      body: string;
+      labels?: string[];
+    }) => {
+      console.log(`DRY RUN -- would create sub-issue under #${parent_issue_number}: ${title}`);
+      return JSON.stringify({ dry_run: true, id: 0, number: 0, title, html_url: `(dry-run) sub-issue of #${parent_issue_number}`, parent_issue_number });
+    },
+    {
+      name: 'create_sub_issue',
+      description: 'Create a new sub-issue under a parent issue. (DRY RUN MODE: will log but not execute)',
+      schema: z.object({
+        parent_issue_number: z.number().describe('The parent issue number'),
+        title: z.string().describe('Title for the new sub-issue'),
+        body: z.string().describe('Body for the new sub-issue'),
+        labels: z.array(z.string()).optional().describe('Labels for the new sub-issue'),
+      }),
+    }
+  );
+}
+
+// ── PR review tools ──────────────────────────────────────────────────────────
+
+export const BOT_REVIEW_MARKER = '<!-- deep-agent-review -->';
+const REVIEW_FOOTER = '\n\n> This is an automated review by deep-agents. A human should verify before merging.';
+
+/**
+ * Tool: Fetch a PR diff as a unified diff string.
+ */
+export function createGetPrDiffTool(octokit: Octokit, owner: string, repo: string) {
+  return tool(
+    async ({ pull_number }: { pull_number: number }) => {
+      try {
+        console.log(`\u{1F50D} Fetching diff for PR #${pull_number} in ${owner}/${repo}...`);
+        const { data } = await withRetry(() => octokit.rest.pulls.get({
+          owner,
+          repo,
+          pull_number,
+          mediaType: { format: 'diff' },
+        }));
+        // When format: 'diff' is used, data comes back as a string
+        const diff = data as unknown as string;
+        const MAX_DIFF_LENGTH = 50000;
+        if (diff.length > MAX_DIFF_LENGTH) {
+          return diff.slice(0, MAX_DIFF_LENGTH) + `\n\n... (diff truncated at ${MAX_DIFF_LENGTH} characters, total: ${diff.length})`;
+        }
+        return diff;
+      } catch (error) {
+        return `Error fetching diff for PR #${pull_number}: ${error}`;
+      }
+    },
+    {
+      name: 'get_pr_diff',
+      description: 'Fetch the unified diff for a pull request. Returns the diff as text. Large diffs are truncated to 50000 characters.',
+      schema: z.object({
+        pull_number: z.number().describe('The pull request number'),
+      }),
+    }
+  );
+}
+
+/**
+ * Tool: Submit a PR review (always forced to COMMENT event).
+ * Includes idempotency check: skips if a review with the bot marker already exists.
+ *
+ * When options.iterationTag is provided, uses an iteration-specific marker
+ * (e.g. `<!-- deep-agent-review-iter-2 -->`) so multiple review iterations
+ * can coexist without the idempotency check blocking subsequent reviews.
+ */
+export function createSubmitPrReviewTool(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  options?: { iterationTag?: number },
+) {
+  const marker = options?.iterationTag != null
+    ? `<!-- deep-agent-review-iter-${options.iterationTag} -->`
+    : BOT_REVIEW_MARKER;
+
+  return tool(
+    async ({ pull_number, body, comments }: {
+      pull_number: number;
+      body: string;
+      comments?: Array<{ path: string; line: number; body: string }>;
+    }) => {
+      try {
+        console.log(`\u{1F4DD} Submitting review on PR #${pull_number} in ${owner}/${repo}...`);
+
+        // Idempotency check: look for existing review with our marker
+        const { data: existingReviews } = await withRetry(() => octokit.rest.pulls.listReviews({
+          owner, repo, pull_number, per_page: 100,
+        }));
+        const alreadyReviewed = existingReviews.some((r) => r.body?.includes(marker));
+        if (alreadyReviewed) {
+          console.log(`\u{26A0}\uFE0F  Skipping review on PR #${pull_number} -- bot review already exists.`);
+          return JSON.stringify({ skipped: true, reason: 'Bot review already exists on this PR.', pull_number });
+        }
+
+        // Build the review body with marker and footer
+        const markedBody = `${marker}\n${body}${REVIEW_FOOTER}`;
+
+        // HARDCODE event to COMMENT -- never APPROVE or REQUEST_CHANGES
+        const reviewParams: Parameters<typeof octokit.rest.pulls.createReview>[0] = {
+          owner, repo, pull_number, body: markedBody, event: 'COMMENT',
+        };
+
+        // Add inline comments if provided
+        if (comments && comments.length > 0) {
+          reviewParams.comments = comments.map((c) => ({
+            path: c.path,
+            line: c.line,
+            body: c.body,
+          }));
+        }
+
+        const { data: review } = await withRetry(() => octokit.rest.pulls.createReview(reviewParams));
+        return JSON.stringify({
+          id: review.id,
+          html_url: review.html_url,
+          state: review.state,
+          pull_number,
+        });
+      } catch (error) {
+        return `Error submitting review on PR #${pull_number}: ${error}`;
+      }
+    },
+    {
+      name: 'submit_pr_review',
+      description: 'Submit a review on a pull request. Always posts as a COMMENT (never approves or requests changes). Automatically skips if a bot review already exists (idempotent). Include inline comments for specific file/line feedback.',
+      schema: z.object({
+        pull_number: z.number().describe('The pull request number to review'),
+        body: z.string().describe('The review summary (Markdown supported)'),
+        comments: z.array(z.object({
+          path: z.string().describe('Relative file path in the repo'),
+          line: z.number().describe('Line number in the diff to comment on'),
+          body: z.string().describe('The inline comment text'),
+        })).optional().describe('Optional inline comments on specific files/lines'),
+      }),
+    }
+  );
+}

@@ -1,0 +1,532 @@
+# Changelog
+
+> **Versioning plan:** Patch bumps per issue, minor bumps at phase milestones.
+> See LEARNING_LOG.md Entry 8 for the full dependency map and version targets.
+>
+> v0.2.0 = Phase 1 (Code Awareness) | v0.3.0 = Phase 2 + 3 (Safety + CLI/Tests)
+> v0.4.0 = Phase 4 (Intelligence) | v0.5.0 = Phase 5 (Resilience) | v0.6.0 = Phase 6 (Webhooks)
+> v0.7.0 = Phase 7 (Deployment) | v1.0.0 = Phase 8 (Reviewer Bot)
+
+---
+
+## v1.3.0 — 2026-02-12
+
+**Architect Supervisor — Multi-Agent Team with LLM-Driven Orchestration.** Replaces the deterministic pipeline (Triage → Analysis → Review → Fix loop) with a non-deterministic Architect agent that coordinates specialist subagents via LLM reasoning.
+
+### Architecture
+
+The Architect is a supervisor agent with three subagents:
+- **Issuer** — understands issues (replaces triage agent). Read-only tools. Produces a natural language brief.
+- **Coder** — implements changes (replaces analysis agent). Read + write tools. Creates branches, commits, PRs.
+- **Reviewer** — reviews PRs. Reads diff, posts COMMENT review.
+
+The Architect makes all orchestration decisions: who works next, what instructions to give, when to iterate, when to stop. This is non-deterministic — the LLM decides the workflow.
+
+### Added
+- **`src/architect.ts`** — supervisor agent with `createArchitect()`, `runArchitect()`, and subagent factories
+- `createIssuerSubagent()` — 5 read-only tools for issue understanding
+- `createCoderSubagent()` — 7 tools (read + write), respects dry-run mode
+- `createReviewerSubagent()` — 4 tools (diff, read, review)
+- `buildArchitectSystemPrompt()` — instructs the supervisor on workflow
+- `getMaxIterations()` — configurable review→fix iteration limit
+- `issuerLlm` config section (env vars: `ISSUER_LLM_*`, backward compat: `TRIAGE_LLM_*`)
+- `coderLlm` config section (env vars: `CODER_LLM_*`)
+- `MAX_ITERATIONS` env var (backward compat: `MAX_FEEDBACK_ITERATIONS`)
+- 34 new tests in `tests/architect.test.ts`
+
+### Changed
+- `runPollCycle()` simplified: fetch → deduplicate → `runArchitect()` per issue (was: separate triage + analysis + message parsing phases)
+- `deepagents analyze --issue N` now runs the full Architect pipeline (was: feedback loop)
+- `deepagents analyze --issue N --dry-run` supported
+- Webhook `issues.opened` handler calls `runArchitect()` instead of `runAnalyzeWithFeedbackLoop()`
+- `buildReviewerSystemPrompt()` exported from `reviewer-agent.ts` (shared with Reviewer subagent)
+- Poll state migration strips legacy `triageResults` field
+
+### Removed
+- `src/agent.ts` — absorbed into Coder subagent
+- `src/triage-agent.ts` — absorbed into Issuer subagent
+- `tests/triage-agent.test.ts` — replaced by `tests/architect.test.ts`
+- `tests/feedback-loop.test.ts` — feedback loop no longer exists
+- `deepagents triage` CLI command — triage is now internal to the Architect
+- Deterministic orchestration functions: `runAnalyzeWithFeedbackLoop`, `buildUserMessage`, `buildAnalyzeMessage`, `buildFixMessage`, `extractProcessedIssues`, `extractIssueActions`, `runTriageSingle`, `fetchSingleIssue`
+
+---
+
+## v1.2.1 — 2026-02-10
+
+**SSE streaming with thinking display and token usage (Issue #51).** The dialog UI now shows agent reasoning in real-time.
+
+### Added
+- **`chatStream()` async generator** in `chat-agent.ts` — streams `tool_start`, `tool_end`, `response`, `usage`, and `error` events via LangGraph `streamEvents()` API
+- **Collapsible "Thinking" block** in dialog UI — shows each tool call name, args, and result as they happen
+- **Token usage badge** — displays input/output/total token counts after each response
+- **Pulsing status indicator** — shows what the agent is currently doing (e.g., "Calling list_repo_files...")
+- 1 new test for tool call streaming events (267 total)
+
+### Changed
+- `/chat` endpoint switched from single JSON response to SSE (`text/event-stream`) format
+- Dialog UI reads SSE stream via fetch + ReadableStream instead of awaiting JSON
+- Thinking block auto-collapses after response arrives
+
+---
+
+## v1.2.0 — 2026-02-10
+
+**Agent-human interactive dialog (Issues #48, #49).** Humans can now chat directly with the agent via a web UI or API endpoint.
+
+### Added
+- **Chat agent** (`src/chat-agent.ts`) — conversational agent using the same LLM and read-only GitHub tools, with LangGraph `MemorySaver` checkpointer for multi-turn conversation state
+- **`/chat` POST endpoint** (Issue #48) — accepts `{ message, sessionId }`, returns agent response with conversation continuity per session
+- **`dialog.html`** (Issue #49) — vanilla HTML/CSS/JS chat UI served at `GET /`, dark theme, auto-resizing input, session management
+- **`createDialogApp()`** and **`startDialogServer()`** factories in `listener.ts`
+- **`deepagents dialog`** CLI subcommand with `--port N` option (default: 3001)
+- `pnpm dialog` script shorthand
+- `@langchain/langgraph` added as direct dependency (was transitive via deepagents)
+- 7 new tests in `tests/listener.test.ts`: health check, HTML serving, chat endpoint, validation, error handling
+
+### Changed
+- `listener.ts` imports `chat-agent.js` for the dialog endpoint
+- CLI help text updated with `dialog` command and examples
+
+---
+
+## v1.1.0 — 2026-02-09
+
+**Consolidate configuration into `.env` as single source of truth (Issue #47).**
+
+During a real setup session, multiple pain points were discovered: secrets scattered across `config.json`, `.env`, and `Caddyfile`; unclear `triageLlm`/`reviewerLlm` shape; `privateKeyPath` confusion between host/container; Ollama `https` vs `http` gotcha. This release replaces `config.json` entirely with `.env` as the single source of truth.
+
+### Added
+- **Environment variable configuration** — `.env` is now the only config method
+- `readLlmFromEnv()`, `parseIntEnv()`, `warnLocalhostHttps()` helper functions in `config.ts`
+- Localhost-HTTPS detection: warns when `baseUrl` uses `https://localhost` or `https://127.0.0.1` (common Ollama gotcha)
+- Comprehensive `.env.example` template covering all config sections
+- Config tests rewritten: env-var-only, no config.json mocking
+
+### Changed
+- `loadConfig()` reads entirely from `process.env` — no JSON file reading
+- Error messages reference env var names (e.g., "Set GITHUB_OWNER and GITHUB_REPO in .env")
+- `Caddyfile.example` uses `{$DOMAIN}` env var — now committable with no secrets
+- `docker-compose.yml`: `env_file: .env` on both services, mounts `Caddyfile.example` directly
+
+### Removed
+- `config.json` support — no longer read or referenced
+- `config.json.example` — deleted from repository
+- `config.json` and `Caddyfile` removed from `.gitignore`
+
+---
+
+## v1.0.0 — 2026-02-09
+
+**Milestone: Phase 8 (Reviewer Bot) complete. Project v1.0.0!** The agent can now review its own PRs. Bot-created PRs are automatically reviewed via webhook, or manually via `deepagents review --pr N`.
+
+### Added
+- **PR review agent** (Issue #15) -- autonomous code reviewer for bot-created PRs
+- New `src/reviewer-agent.ts` with `createReviewerAgent()` factory and `runReviewSingle()` entry point
+- Reviewer reads PR diff, examines source files for context, and posts a structured review
+- System prompt instructs: evaluate approach, find bugs/risks, suggest improvements, never approve/merge
+- `reviewerLlm` optional config field for using a different model for reviews (like `triageLlm`)
+- Circuit breaker (15 tool calls) and structured logging on all reviewer tools
+- **`submit_pr_review` tool** (Issue #16) -- post a review on a GitHub pull request
+- Event HARDCODED to `COMMENT` -- the tool can never approve or request changes, even if the LLM tries
+- `<!-- deep-agent-review -->` HTML marker for idempotency (skips if bot already reviewed)
+- Automated footer: "This is an automated review by deep-agents. A human should verify before merging."
+- Inline comment support: `comments` array with `{ path, line, body }` for line-level feedback
+- **`get_pr_diff` tool** -- fetch unified diff for a PR via Octokit (truncated at 50k chars)
+- **`deepagents review --pr N`** CLI subcommand for manual PR review
+- 12 new tests in `tests/reviewer-agent.test.ts`: diff tool, review tool, idempotency, COMMENT enforcement, inline comments
+
+### Changed
+- `handlePullRequestEvent()` now triggers the reviewer agent (was a stub logging "not implemented")
+- `handlePullRequestEvent()` is now async and accepts optional `Config` parameter
+- `handleWebhookEvent()` passes config to PR handler (enables review on webhook delivery)
+- Removed `PrReviewStub` interface (replaced by the real reviewer agent)
+- Updated `listener.test.ts` with reviewer mock and async test patterns (2 new tests: config trigger, error handling)
+
+---
+
+## v0.7.0 — 2026-02-09
+
+**Milestone: Phase 7 (Deployment) complete.** Docker stack with Caddy reverse proxy. GitHub App authentication support alongside PAT.
+
+### Added
+- **Docker + Caddy deployment** (Issue #21) — containerized deployment with automatic HTTPS
+- `Dockerfile`: Node 24-slim base, pnpm via corepack, healthcheck against GET /health
+- `docker-compose.yml`: two-service stack (bot + Caddy reverse proxy) with health-gated startup
+- `Caddyfile`: reverse proxy with automatic TLS via Let's Encrypt (placeholder domain)
+- `.dockerignore`: excludes node_modules, .git, credentials, tests, and generated files
+- README "Docker Deployment" section with step-by-step setup instructions
+- **GitHub App authentication** (Issue #19) — migrate from PAT-only to support both PAT and GitHub App auth
+- `createGitHubClient()` now accepts either a PAT string or `GitHubAppAuth` object
+- `getAuthFromConfig()` helper extracts the correct auth mode from config
+- `GitHubAppAuth` interface exported for programmatic use
+- `@octokit/auth-app` added as production dependency
+- `*.pem` added to `.gitignore`
+- `config.json.example` updated with GitHub App field placeholders
+
+### Changed
+- Config validation: `github.token` is no longer required when App auth fields (`appId`, `privateKeyPath`, `installationId`) are provided
+- Partial App config (e.g., `appId` without `privateKeyPath`) is rejected with a clear error
+- Private key file existence is validated at config load time
+- All call sites (`agent.ts`, `triage-agent.ts`, `core.ts`) updated to use `getAuthFromConfig()`
+- 8 new tests: config validation (7) + GitHub App client creation (1)
+
+---
+## v0.6.0 — 2026-02-09
+
+**Milestone: Phase 6 (Webhook & Real-Time) partially complete.** The webhook listener now dispatches `issues.opened` and `pull_request.opened` events. Issue #18 (persistent job queue) deferred — not needed for learning goals.
+
+### Added
+- **Handle `issues.opened` webhook event** (Issue #13) — triggers analysis pipeline on new issues
+- `handleIssuesEvent()` extracts issue number, calls `runAnalyzeSingle()` for triage + analysis
+- `createWebhookApp()` and `startWebhookServer()` accept optional full `Config` for analysis dispatch
+- Fire-and-forget pattern: webhook responds 200 immediately, analysis runs async
+- **Handle `pull_request.opened` webhook event** (Issue #14) — dispatches PR events from the webhook listener
+- `handlePullRequestEvent()` extracts PR metadata (number, title, body, head/base ref, draft status)
+- **Loop prevention**: `isBotPr()` checks for `<!-- deep-agent-pr -->` HTML marker in PR body OR `issue-N-*` branch naming pattern
+- Bot-created PRs are logged as "queued for review" (stub — actual reviewer bot deferred to Issue #15)
+- Non-bot PRs are ignored (logged and skipped)
+- `handleWebhookEvent()` dispatcher routes events to the correct handler
+- `PrReviewStub` interface exported for Issue #15 to wire into
+- 23 new tests: handleIssuesEvent (6), isBotPr (5), handlePullRequestEvent (9), handleWebhookEvent dispatcher (3)
+
+---
+
+## v0.5.0 — 2026-02-08
+
+**Milestone: Phase 5 (Resilience) complete.** Transient API failures are retried. Container stops don't lose work. Agent actions can be retracted by humans via CLI. Tool calls are logged with arguments and timing.
+
+### Added
+- **Retract command** (Issue #32) — `deepagents retract --issue N` undoes all agent actions on an issue
+- `retractIssue()` function in `src/core.ts`: closes PR, deletes branch, deletes comment (in that order)
+- Uses enriched metadata from v0.3.7 (#31) to find PR numbers, branch names, and comment IDs
+- Partial retraction: if one step fails, the remaining steps still execute
+- Skips actions with zero/empty IDs (safe for migrated old-format state)
+- Poll state updated after retraction: issue cleared from `issues` map and `lastPollIssueNumbers`
+- `deepagents retract --issue N` CLI subcommand with summary output
+- `RetractResult` interface exported for programmatic use
+- 7 new unit tests covering: full retraction, missing state, missing issue, partial retraction, error handling, migrated-format safety
+
+---
+
+## v0.4.0 — 2026-02-08
+
+**Milestone: Phase 4 (Intelligence) complete.** Issues go through triage (cheap/fast) then deep analysis (thorough) with triage context passed through.
+
+### Changed
+- **Triage-to-analysis handoff** (Issue #4) — triage results are now passed to the analysis agent as context
+- `buildUserMessage()` accepts optional `triageResults` parameter (5th argument)
+- When triage context is available, the user message includes issue type, complexity, relevant files, and summary
+- `PollState` gains optional `triageResults` field to persist triage data across runs
+- `runPollCycle()` collects triage results and passes them to `buildUserMessage()`, also saves them in poll state
+- System prompt in `agent.ts` updated to instruct the agent to use triage context (skip `list_repo_files` when triage already identified relevant files)
+- 13 new tests for triage-to-analysis handoff in `tests/core.test.ts`
+
+---
+
+## v0.3.7 — 2026-02-08
+
+### Changed
+- **Enriched action tracking metadata** (Issue #31) — `IssueActions` now stores full API response metadata instead of simple booleans
+- `comment` field: `{ id, html_url }` (was `commented: boolean`)
+- `branch` field: `{ name, sha }` (was `branch: string | null`)
+- `commits` field: `Array<{ path, sha, commit_sha }>` (new)
+- `pr` field: `{ number, html_url }` (was `pr: number | null`)
+- `extractIssueActions()` now correlates tool calls with responses using pending-state tracking
+- `migratePollState()` handles 3 format generations: pre-v0.2.10, v0.2.10 boolean, v0.3.7+ enriched
+- `buildUserMessage()` and `showStatus()` updated to use enriched field names
+- 12 new enriched metadata tests + existing tests updated
+
+---
+
+## v0.3.6 — 2026-02-08
+
+### Added
+- **Graceful shutdown** (Issue #22) — SIGTERM/SIGINT handlers save poll state before exiting
+- `requestShutdown()`, `isShuttingDown()`, `resetShutdown()` exported from `src/core.ts`
+- Signal handlers registered in both `src/index.ts` and `src/cli.ts`
+- Shutdown checks at three points in `runPollCycle()`: between triage iterations, after triage phase, before analysis phase
+- 4 new unit tests in `tests/core.test.ts` (`describe('graceful shutdown', ...)`)
+
+### Changed
+- `process.exit(1)` replaced with `process.exitCode = 1` in entry point error handlers (allows pending I/O to flush)
+- `process.exit(2)` replaced with `process.exitCode = 2` for circuit breaker exit (same rationale)
+
+---
+
+## v0.3.5 — 2026-02-08
+
+### Added
+- **HTTP webhook listener** (Issue #12) — Express server to receive GitHub webhook events
+- New `src/listener.ts` with `createWebhookApp()` and `startWebhookServer()` factories
+- POST `/webhook` endpoint with HMAC-SHA256 signature verification (`X-Hub-Signature-256`)
+- GET `/health` health check endpoint
+- Event type parsing from `X-GitHub-Event` header with delivery ID tracking
+- `webhook` config section: `{ port, secret }` with validation in `config.ts`
+- `deepagents webhook` CLI subcommand to start the listener
+- `pnpm webhook` script shorthand
+- 20 new unit tests (15 listener + 5 config) covering signature verification, endpoint behavior, config validation
+- `express` added as production dependency, `@types/express` as dev dependency
+
+### Changed
+- `config.json.example` updated with `webhook` section placeholder
+
+---
+
+## v0.3.4 — 2026-02-08
+
+### Added
+- **Retry with exponential backoff** (Issue #17) — all GitHub API calls now retry on transient failures
+- New `src/utils.ts` with `withRetry()` utility, `isRetryableError()` classifier, `getRetryAfterMs()` helper
+- Retries on: HTTP 5xx, 429 (rate limit with Retry-After header), network errors (ECONNRESET, ETIMEDOUT, etc.)
+- Does NOT retry 4xx client errors (except 429)
+- Default: 3 retries with exponential backoff (1s, 2s, 4s)
+- All Octokit API calls in `github-tools.ts` wrapped with `withRetry()`
+- 18 new tests in `tests/utils.test.ts`
+
+### Changed
+- `tests/github-tools.test.ts` branch error test uses 403 (non-retryable) instead of 500
+
+---
+
+## v0.3.3 — 2026-02-08
+
+### Added
+- **Structured logging for tool calls** (Issue #33) — every tool invocation logs name, arguments, timing, and circuit breaker headroom
+- New `src/logger.ts` with `wrapWithLogging()` composable wrapper function
+- Log format: `[HH:MM:SS] TOOL #N/M | tool_name | { args } | Xms`
+- Errors logged to stderr with context before re-throwing
+- 9 new unit tests in `tests/logger.test.ts`
+
+### Changed
+- `src/agent.ts` applies logging wrapper as outermost layer on all 7 tools
+- `src/triage-agent.ts` applies logging wrapper on all 3 read-only tools
+
+---
+
+## v0.3.2 — 2026-02-08
+
+### Added
+- **Triage agent** (Issue #3) — first phase of the two-phase agent pipeline
+- New `src/triage-agent.ts` with `createTriageAgent()` factory, read-only tools only
+- `TriageOutput` interface: issueType, complexity, relevantFiles, shouldAnalyze, skipReason, summary
+- `parseTriageOutput()` parses LLM JSON response with validation and fallback
+- `triageLlm` optional config field for using a cheaper model for triage
+- `deepagents triage --issue N` CLI subcommand for standalone triage
+- Triage pre-filter wired into `runPollCycle()` — issues are triaged before full analysis
+- `fetchSingleIssue()` and `runTriageSingle()` exported from core for reuse
+- 24 new unit tests (19 triage + 5 config) — total 113
+
+### Changed
+- `runPollCycle()` now fetches issues and runs triage before invoking the analysis agent
+- `config.json.example` updated with `triageLlm` field placeholder
+
+---
+
+## v0.3.1 — 2026-02-08
+
+### Added
+- **`create_or_update_file` tool** (Issue #25) — commits files to branches via GitHub Contents API
+- Agent can now push proposed code changes to feature branches, producing PRs with actual diffs
+- Dry-run stub for the new tool
+- Circuit breaker wraps the new tool
+- **Self-review step** (Issue #27) — agent reads back committed files and sanity-checks before opening PR
+- Agent workflow expanded from 5 to 7 steps: analyze → comment → document → branch → commit → self-review → PR
+
+### Changed
+- System prompt updated with code quality guidelines (soft, not hard constraints)
+- Agent now produces PRs with real file changes instead of empty branches
+
+---
+
+## v0.3.0 — 2026-02-08
+
+**Milestone: Phase 2 (Safety & Idempotency) + Phase 3 (CLI & Testing) complete.**
+
+The bot is now safe for unattended operation. All write operations are idempotent, resource usage is bounded, and there's a CLI for development and debugging with 67 unit tests.
+
+### Phase 2 — Safety & Idempotency (Issues #5, #6, #7, #8, #9, #10, #11)
+- Max issues per run — code-enforced in tool constructor
+- Duplicate comment prevention via HTML marker detection
+- Duplicate branch prevention via getRef check
+- Duplicate PR prevention via pulls.list check
+- Circuit breaker — kills run after N tool calls
+- True --dry-run mode — swaps write tools with logging stubs
+- Per-issue action tracking in poll state with migration
+- Cron lock file in poll.sh
+
+### Phase 3 — CLI & Testing (Issues #23, #24)
+- CLI wrapper with subcommands: poll, analyze, status, dry-run, help
+- Core logic extracted to src/core.ts
+- 67 unit tests across 4 files (vitest)
+
+---
+
+## v0.2.10 — 2026-02-08
+
+### Added
+- **Per-issue action tracking** (Issue #11) — poll state now records which workflow steps completed per issue
+- `IssueActions` interface: `{ commented, branch, pr }` per issue number
+- `extractIssueActions()` scans agent tool calls to build action records
+- `migratePollState()` upgrades old poll state format (no `issues` field) to new format
+- Agent message includes partially-processed issue status so it can resume incomplete work
+- `deepagents status` now shows per-issue action breakdown
+
+### Changed
+- `PollState` interface adds optional `issues` field (backwards-compatible)
+- `buildUserMessage()` accepts optional `issueActions` parameter
+- `showStatus()` displays per-issue action details and maxToolCallsPerRun
+
+## v0.2.9 — 2026-02-08
+
+### Added
+- **Circuit breaker** (Issue #6) — caps total tool calls per agent run to prevent runaway loops
+- `maxToolCallsPerRun` config option (default: 30)
+- `--max-tool-calls N` CLI flag to override at runtime
+- `ToolCallCounter` class with shared counter across all tools
+- `wrapWithCircuitBreaker()` utility wraps any LangChain tool with counting
+- `CircuitBreakerError` custom error class with `callCount` and `callLimit` properties
+- Agent saves poll state before exiting on circuit break (partially-processed issues are preserved)
+- Process exits with code 2 when circuit breaker trips (distinguishable from normal errors)
+
+## v0.2.8 — 2026-02-08
+
+### Added
+- **True dry-run mode** (Issue #7) — `--dry-run` flag skips all GitHub write operations
+- Dry-run tool wrappers for `comment_on_issue`, `create_branch`, `create_pull_request`
+- Write tools log what they WOULD do and return fake success (`{ dry_run: true }`)
+- Read tools (`fetch_github_issues`, `list_repo_files`, `read_repo_file`) still execute normally
+- Local file writes (`write_file` for `./issues/`) still execute normally
+- Poll state is NOT saved in dry-run mode
+
+### Changed
+- `--no-save` and `--dry-run` are now separate flags (`--dry-run` implies `--no-save`)
+- `runPollCycle` options split into `noSave` (skip state save) and `dryRun` (skip GitHub writes + state save)
+
+## v0.2.7 — 2026-02-08
+
+### Changed
+- **Cron lock file** — `poll.sh` now uses `mkdir`-based lock to prevent overlapping cron runs
+- **maxIssuesPerRun enforced in tool** — `fetch_github_issues` now clamps the `limit` parameter to `maxIssuesPerRun` at the code level, not just in the prompt
+
+## v0.2.6 — 2026-02-08
+
+### Added
+- **Test infrastructure** (Issue #23) — vitest setup with unit tests for all modules
+- `vitest` added as dev dependency with `vitest.config.ts`
+- `pnpm test` runs all tests, `pnpm run test:watch` for watch mode
+- 4 test files covering: `core.ts`, `github-tools.ts`, `model.ts`, `config.ts`
+- Mock patterns: Octokit mock factory, `vi.mock` for LLM constructors, `fs` spies, `process.exit` interception
+- Tests cover: idempotency logic (comment/branch/PR), config validation, provider routing, pure functions, file truncation
+
+## v0.2.5 — 2026-02-08
+
+### Added
+- **CLI wrapper** (Issue #24) — proper subcommand interface for all agent operations
+- New `src/cli.ts` entry point with subcommands: `poll`, `analyze`, `status`, `help`
+- New `src/core.ts` extracts reusable functions from `index.ts` (shared by both entry points)
+- `--dry-run` flag for poll command (no poll state written)
+- `--max-issues N` flag to override config at runtime
+- `--issue N` flag for single-issue analysis (`deepagents analyze --issue 42`)
+- `dry-run` shorthand command (equivalent to `poll --dry-run`)
+- `bin` field in package.json for CLI usage
+- `pnpm run cli` script for development
+
+### Changed
+- `src/index.ts` is now a thin backwards-compatible wrapper that delegates to `core.ts`
+- `maxIssuesPerRun` validated with type check and positivity guard (addresses Critic Finding #7)
+
+## v0.2.4 — 2026-02-08
+
+### Changed
+- **Prevent duplicate PRs** (Issue #10) — `create_pull_request` is now idempotent
+- Checks for existing open PR on the same head branch before creating
+- Returns `{ skipped: true }` with existing PR URL if one already exists
+
+## v0.2.3 — 2026-02-08
+
+### Changed
+- **Prevent duplicate branches** (Issue #9) — `create_branch` is now idempotent
+- Checks if branch already exists before creating (uses `getRef` with 404 detection)
+- Returns `{ skipped: true }` with branch URL if branch already exists
+
+## v0.2.2 — 2026-02-08
+
+### Changed
+- **Prevent duplicate comments** (Issue #8) — `comment_on_issue` is now idempotent
+- Checks for existing bot comment (hidden HTML marker) before posting
+- Returns `{ skipped: true }` if analysis comment already exists
+- Uses `<!-- deep-agent-analysis -->` marker pattern (standard in GitHub bots)
+
+## v0.2.1 — 2026-02-08
+
+### Added
+- **Max issues per run** (Issue #5) — caps how many issues the agent processes per invocation
+- `maxIssuesPerRun` config option in `config.json` (default: 5)
+- Limit displayed at startup for operator visibility
+
+### Changed
+- User message to the agent now includes the issue limit explicitly
+
+## v0.2.0 — 2026-02-08 — Phase 1 Complete: Code Awareness
+
+**Milestone:** The agent can now read actual source code, not just issue descriptions. Analysis quality jumps from guessing to code-aware.
+
+### Phase 1 Summary
+- Two new read-only tools give the agent full codebase visibility
+- `list_repo_files` traverses Git's object model (ref -> commit -> tree) to enumerate all files
+- `read_repo_file` uses the Content API to fetch and decode individual file contents
+- Together they enable the **browse-then-read** pattern: list files, identify relevant ones, read them
+- See LEARNING_LOG Entries 9-11 for the full teaching narrative and Critic review
+
+### Added (v0.1.2)
+- **`list_repo_files` tool** (Issue #1) — lists all files in the repository with path and size info
+- Path prefix filtering (e.g., `"src/"` to list only source files)
+- Branch parameter for listing files on non-default branches
+- Truncation warning when GitHub API truncates large repos
+
+### Added (v0.1.3)
+- **`read_repo_file` tool** (Issue #2) — reads a single file's contents from the repository
+- Decodes base64 content from GitHub API to UTF-8 text
+- Returns file path, size, SHA, and full content
+- Files over 500 lines are truncated with metadata (prevents LLM context flooding)
+- Handles edge cases: directories, symlinks, files over 1MB
+
+### Changed
+- System prompt updated to guide the agent to list and read relevant source files during analysis
+- Agent now has 6 custom GitHub tools (was 4)
+
+## v0.1.1 — 2026-02-08
+
+### Added
+- **Multi-provider LLM support** via new `src/model.ts` — supports Anthropic, OpenAI, Ollama, and any OpenAI-compatible API
+- `baseUrl` config field for custom API endpoints (LM Studio, Together, Groq, etc.)
+- Ollama shorthand provider — defaults to `localhost:11434/v1`
+- API key validation skips local providers (ollama, openai-compatible)
+
+### Changed
+- Extracted model creation from `agent.ts` into dedicated `model.ts`
+- Updated `config.json.example` with `baseUrl` field
+
+## v0.1.0 — 2026-02-08
+
+Initial release: cron-based GitHub issue poller with AI analysis.
+
+### Features
+- **Poll GitHub issues** via cron (`poll.sh`) with state tracking (`last_poll.json`)
+- **Analyze issues** using a Deep Agent (LangChain + Anthropic Claude)
+- **Comment on issues** with high-level findings summary
+- **Write detailed analysis** to `./issues/issue_<number>.md`
+- **Create feature branches** (`issue-<number>-<description>`)
+- **Open draft PRs** linked to issues via `Closes #N`
+
+### Tools
+- `fetch_github_issues` — fetch open issues with `since` polling support
+- `comment_on_issue` — post analysis comment on GitHub issue
+- `create_branch` — create feature branch from default branch
+- `create_pull_request` — open draft PR (never auto-merges)
+
+### Documentation
+- `LEARNING_LOG.md` — 7-entry learning narrative covering architecture, implementation, and review
+- `README.md` — setup guide, testing instructions, troubleshooting
+- `CLAUDE.md` — project objectives and conventions

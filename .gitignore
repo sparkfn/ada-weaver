@@ -1,0 +1,8 @@
+node_modules/
+last_poll.json
+poll.log
+poll.lock/
+.claude/
+CLAUDE.md
+*.pem
+.env

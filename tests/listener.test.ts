@@ -14,7 +14,7 @@ import type { WebhookConfig, WebhookEvent } from '../src/listener.js';
 
 vi.mock('../src/architect.js', () => ({
   runArchitect: vi.fn().mockResolvedValue({
-    issueNumber: 0, prNumber: null, outcome: 'done',
+    issueNumber: 0, prNumber: null, prNumbers: [], outcome: 'done',
   }),
 }));
 
@@ -552,7 +552,7 @@ describe('handleIssuesEvent', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.mocked(runArchitect).mockReset().mockResolvedValue({
-      issueNumber: 0, prNumber: null, outcome: 'done',
+      issueNumber: 0, prNumber: null, prNumbers: [], outcome: 'done',
     });
   });
 

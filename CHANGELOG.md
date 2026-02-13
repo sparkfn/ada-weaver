@@ -9,6 +9,33 @@
 
 ---
 
+## v1.5.0 — 2026-02-13
+
+**Parallel Subagent Support.** The Architect supervisor can now spawn concurrent subagents for independent tasks. When an issue has multiple independent sub-tasks, the Architect can delegate to multiple coders or reviewers in parallel instead of running them sequentially.
+
+### Added
+- **Parallel execution prompt section** in Architect system prompt — describes when and how to use parallel task delegation, with rules for branch naming and independence
+- **`findAllPrsForIssue()`** in `src/core.ts` — discovers ALL matching PRs for an issue (not just the first)
+- **`SubagentRun` interface** in `src/architect.ts` — tracks individual subagent executions by run ID
+- **`prNumbers` field** on `ArchitectResult` — array of all PR numbers found (backward compat: `prNumber` still populated with first match)
+- **`prNumbers` field** on `AgentProcess` — propagated from architect result
+- **`activePhases` field** on `AgentProcess` — currently active subagent phases (supports duplicates for parallel same-type runs)
+- **`runId` field** on `ProgressUpdate` — unique identifier for each subagent execution
+- **Concurrent phase display** in dashboard — shows side-by-side chips with spinners when multiple phases are active simultaneously
+- **Multi-PR display** in CLI (`analyze` and `continue` commands) and dashboard detail view
+- 9 new tests: `findAllPrsForIssue` (3), parallel prompt (2), concurrent phase tracking (2), dashboard parallel fields (2) — **408 tests total**
+
+### Changed
+- `runArchitect()` event tracking refactored from single variables (`activeSubagent`, `activeStartTime`, `activeLabel`) to a `Map<string, SubagentRun>` keyed by `ev.run_id` — supports concurrent tool executions
+- `runArchitect()` uses `findAllPrsForIssue()` for PR discovery at end of run
+- `on_chat_model_end` usage tracking resolves agent role from active runs map (falls back to 'architect' when 0 or 2+ runs active)
+- `ProcessManager.onProgress` tracks phases by run ID using a `Map<string, string>` instead of a Set
+- Dashboard `PhaseTimeline` component accepts `activePhases` prop for concurrent display
+- Dashboard `ProcessesTable` phase column shows multiple chips when concurrent
+- Listener logs multiple PRs when present
+
+---
+
 ## v1.4.0 — 2026-02-13
 
 **Web Dashboard, Continue Command, and Coder Planning Phase.** Adds a visual web dashboard for managing agent processes, the ability to resume review/fix cycles on existing PRs, and a mandatory planning phase for the coder subagent.

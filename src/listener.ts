@@ -211,10 +211,17 @@ export async function handleIssuesEvent(event: WebhookEvent, config?: Config): P
 
   try {
     const result = await runArchitect(config, issueNumber);
-    console.log(
-      `[webhook] Architect complete for issue #${issueNumber}` +
-      `${result.prNumber ? `, PR #${result.prNumber}` : ''}`,
-    );
+    if (result.prNumbers.length > 1) {
+      console.log(
+        `[webhook] Architect complete for issue #${issueNumber}` +
+        `, PRs: ${result.prNumbers.map(n => `#${n}`).join(', ')}`,
+      );
+    } else {
+      console.log(
+        `[webhook] Architect complete for issue #${issueNumber}` +
+        `${result.prNumber ? `, PR #${result.prNumber}` : ''}`,
+      );
+    }
   } catch (err) {
     console.error(`[webhook] Architect failed for issue #${issueNumber}:`, err);
   }

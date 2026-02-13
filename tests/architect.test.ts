@@ -53,6 +53,19 @@ describe('buildArchitectSystemPrompt', () => {
     expect(prompt).toContain('in_progress');
     expect(prompt).toContain('failure');
   });
+
+  it('contains PARALLEL EXECUTION section', () => {
+    const prompt = buildArchitectSystemPrompt('o', 'r', 3);
+    expect(prompt).toContain('PARALLEL EXECUTION');
+    expect(prompt).toContain('multiple independent tasks');
+  });
+
+  it('contains RULES FOR PARALLEL DELEGATION', () => {
+    const prompt = buildArchitectSystemPrompt('o', 'r', 3);
+    expect(prompt).toContain('RULES FOR PARALLEL DELEGATION');
+    expect(prompt).toContain('different branch');
+    expect(prompt).toContain('issuer step should remain sequential');
+  });
 });
 
 // ── createIssuerSubagent ────────────────────────────────────────────────────

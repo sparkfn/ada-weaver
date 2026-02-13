@@ -5686,3 +5686,85 @@ This applies to both new issues and fix iterations. For fixes, the coder still p
 - **Entry 44** (Reviewer Bot): The continue command directly enables the reviewer's `needs_changes` verdict to trigger re-runs without restarting the entire pipeline.
 - **Entry 20** (Circuit Breaker): The coder planning phase adds another layer of quality — the coder reads first, plans, then executes within its tool call budget.
 - **Entry 32** (Graceful Shutdown): The dashboard server hooks into the same `gracefulShutdown()` signal handler, and `AbortSignal` provides clean cancellation for running processes.
+
+---
+
+## Entry 49: Parallel Subagent Execution — Tracking Concurrent Runs with LangGraph streamEvents
+
+**Date:** 2026-02-13
+**Author:** Architect Agent
+
+### The problem: sequential assumptions everywhere
+
+The deepagents library (built on LangGraph) natively supports parallel tool calls — when the Architect's LLM returns multiple `task` tool calls in a single response, LangGraph executes them concurrently with isolated state. However, our event tracking, data models, dashboard UI, and CLI all assumed one-subagent-at-a-time.
+
+The core issue was in `runArchitect()`: single variables (`activeSubagent`, `activeStartTime`, `activeLabel`) tracked the currently running subagent. If two tool_start events arrived before a tool_end, the second would overwrite the first, losing timing data and producing wrong labels.
+
+### The solution: Map-based concurrent run tracking
+
+**Key insight:** LangGraph's `streamEvents()` API provides an `ev.run_id` on every event. This is a unique identifier per tool invocation — the same `run_id` appears on both `on_tool_start` and `on_tool_end` for a given subagent execution.
+
+The fix replaces three scalar variables with a single Map:
+
+```typescript
+// Before (sequential only):
+let activeSubagent: string | null = null;
+let activeStartTime = 0;
+let activeLabel = '';
+
+// After (concurrent-safe):
+const activeRuns = new Map<string, SubagentRun>();
+// where SubagentRun = { subagentType, startTime, label }
+```
+
+On `on_tool_start`, we `set(ev.run_id, { subagentType, startTime, label })`. On `on_tool_end`, we `get(ev.run_id)` to retrieve timing and type info, then `delete(ev.run_id)`.
+
+### ProcessManager: Map over Set
+
+A similar issue appeared in the `ProcessManager` progress callback. The initial attempt used a `Set<string>` for `activePhases`, but a Set deduplicates — two concurrent coders would show as `['coder']` instead of `['coder', 'coder']`.
+
+The fix uses `Map<string, string>` (runId → phase), deriving the `activePhases` array via `Array.from(map.values())`. This preserves duplicates while still supporting clean removal.
+
+### PR discovery: findAllPrsForIssue
+
+With parallel coders, multiple PRs can be created for a single issue (e.g., `issue-5-part-a`, `issue-5-part-b`). The existing `findPrForIssue()` returned only the first match. A new `findAllPrsForIssue()` function returns all matching PRs. The result interface gains `prNumbers: number[]` alongside the backward-compatible `prNumber: number | null`.
+
+### Dashboard: concurrent phase visualization
+
+The `PhaseTimeline` component needed to handle two modes:
+1. **Sequential** (standard): linear stepper showing issuer → coder → reviewer
+2. **Concurrent**: side-by-side chips with count badges when `activePhases.length > 1`
+
+The table view similarly shows multiple phase chips when concurrent.
+
+### What the Architect decides
+
+The Architect's system prompt now includes a `PARALLEL EXECUTION` section with rules:
+- Each parallel coder must work on a different branch
+- Never send the same task to two subagents simultaneously
+- The issuer step should remain sequential
+- The standard sequential workflow is always valid — parallelism is optional
+
+This is advisory, not enforced. The Architect is an LLM making judgment calls about when tasks are truly independent. The infrastructure just needs to handle whatever it decides correctly.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/core.ts` | Added `findAllPrsForIssue()` |
+| `src/architect.ts` | Refactored event tracking to `Map<string, SubagentRun>`, extended `ArchitectResult` with `prNumbers`, added parallel execution section to system prompt, updated PR discovery |
+| `src/process-manager.ts` | Extended `ProgressUpdate` with `runId`, `AgentProcess` with `prNumbers`/`activePhases`, progress callback uses `Map<string, string>` |
+| `src/cli.ts` | Multi-PR output in `analyze` and `continue` commands |
+| `static/dashboard.html` | Concurrent phase display in PhaseTimeline, table, and PR links |
+| `src/listener.ts` | Logs multiple PRs when present |
+| `tests/core.test.ts` | 3 tests for `findAllPrsForIssue` |
+| `tests/architect.test.ts` | 2 tests for parallel prompt section |
+| `tests/process-manager.test.ts` | 2 tests for concurrent phase tracking |
+| `tests/dashboard.test.ts` | 2 tests for parallel fields in API responses |
+
+### Connections to previous entries
+
+- **Entry 48** (Dashboard): The concurrent phase display extends the PhaseTimeline component built in that entry.
+- **Entry 47** (SSE Streaming): The `run_id` correlation pattern is similar to how we tracked `chatModelStartTime` for usage metrics — both rely on event pairing.
+- **Entry 45** (Architect Supervisor): The parallel execution is a direct extension of the Architect's non-deterministic workflow. The infrastructure now matches the capability LangGraph already provided.
+- **Entry 44** (Reviewer Bot): Parallel reviewers are now possible — multiple PRs can be reviewed simultaneously.

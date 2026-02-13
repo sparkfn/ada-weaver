@@ -27,7 +27,7 @@ import {
 } from './github-tools.js';
 import { formatDuration, logAgentEvent, logDiff } from './logger.js';
 import { buildReviewerSystemPrompt } from './reviewer-agent.js';
-import { findPrForIssue } from './core.js';
+import { findPrForIssue, findAllPrsForIssue } from './core.js';
 import type { Octokit } from 'octokit';
 import type { ProgressUpdate } from './process-manager.js';
 import type { UsageService } from './usage-service.js';
@@ -38,7 +38,14 @@ import type { AgentRole, LLMProvider } from './usage-types.js';
 export interface ArchitectResult {
   issueNumber: number;
   prNumber: number | null;
+  prNumbers: number[];
   outcome: string;
+}
+
+interface SubagentRun {
+  subagentType: string;
+  startTime: number;
+  label: string;
 }
 
 // ── Subagent builders ────────────────────────────────────────────────────────
@@ -276,6 +283,20 @@ STANDARD WORKFLOW:
    - Then delegate to reviewer again (and recheck CI if applicable)
 8. Report the final outcome
 
+PARALLEL EXECUTION (advanced):
+When multiple independent tasks can run simultaneously, you may call the task tool
+multiple times in a single response. For example:
+- After the issuer's brief reveals multiple independent sub-tasks, you can delegate
+  to multiple coders in parallel (each working on a separate branch/PR).
+- You can review multiple PRs in parallel by delegating to reviewer multiple times.
+
+RULES FOR PARALLEL DELEGATION:
+- Each parallel coder MUST work on a different branch (e.g., issue-N-part-a, issue-N-part-b).
+- Never send the same task to two subagents simultaneously.
+- The issuer step should remain sequential (only one issue to analyze).
+- If unsure whether tasks are independent, run them sequentially.
+- The standard sequential workflow is always valid — parallelism is optional.
+
 ITERATION LIMIT: ${maxIterations} review→fix cycles maximum. After that, report the current state.
 
 CRITICAL RULES:
@@ -451,9 +472,7 @@ Skip the issuer step — go directly to the reviewer:
   let reviewerCount = 0;
   let coderAfterReview = false;
   let coderFixCount = 0;
-  let activeSubagent: string | null = null;
-  let activeStartTime = 0;
-  let activeLabel = '';
+  const activeRuns = new Map<string, SubagentRun>();
   let lastResponse = '';
   let chatModelStartTime = 0;
 
@@ -477,9 +496,7 @@ Skip the issuer step — go directly to the reviewer:
       }
       const subagentType: string = input?.subagent_type ?? 'unknown';
       const description: string = input?.description ?? '';
-
-      activeSubagent = subagentType;
-      activeStartTime = performance.now();
+      const runId: string = ev.run_id ?? `run-${Date.now()}`;
 
       // Build iteration label
       let label = '';
@@ -490,30 +507,35 @@ Skip the issuer step — go directly to the reviewer:
         coderFixCount++;
         label = ` [fix iteration ${coderFixCount}]`;
       }
-      activeLabel = label;
+
+      activeRuns.set(runId, { subagentType, startTime: performance.now(), label });
 
       logAgentEvent(subagentType, `started${label}`, description);
       options.onProgress?.({
         phase: subagentType,
         action: 'started',
+        runId,
         iteration: reviewerCount || coderFixCount || undefined,
         maxIterations,
         detail: description,
       });
     } else if (ev.event === 'on_tool_end' && ev.name === 'task') {
-      if (activeSubagent) {
-        const duration = formatDuration(performance.now() - activeStartTime);
+      const runId: string = ev.run_id ?? '';
+      const run = activeRuns.get(runId);
+      if (run) {
+        const duration = formatDuration(performance.now() - run.startTime);
 
-        logAgentEvent(activeSubagent, `completed${activeLabel} (${duration})`);
+        logAgentEvent(run.subagentType, `completed${run.label} (${duration})`);
         options.onProgress?.({
-          phase: activeSubagent,
+          phase: run.subagentType,
           action: 'completed',
+          runId,
           iteration: reviewerCount || coderFixCount || undefined,
           maxIterations,
         });
 
         // After the coder completes, fetch and display the PR diff
-        if (activeSubagent === 'coder') {
+        if (run.subagentType === 'coder') {
           try {
             // Extract PR number from tool output or find via API
             let diffPrNumber: number | undefined;
@@ -549,12 +571,11 @@ Skip the issuer step — go directly to the reviewer:
         }
 
         // After the first reviewer completes, subsequent coder calls are fix iterations
-        if (activeSubagent === 'reviewer') {
+        if (run.subagentType === 'reviewer') {
           coderAfterReview = true;
         }
 
-        activeSubagent = null;
-        activeLabel = '';
+        activeRuns.delete(runId);
       }
     } else if (ev.event === 'on_chat_model_start') {
       chatModelStartTime = performance.now();
@@ -573,7 +594,13 @@ Skip the issuer step — go directly to the reviewer:
           }
           const usage = modelOutput?.usage_metadata;
           if (usage) {
-            const agentRole: AgentRole = (activeSubagent as AgentRole) ?? 'architect';
+            const agentRole: AgentRole = (() => {
+              if (activeRuns.size === 1) {
+                const run = activeRuns.values().next().value!;
+                return run.subagentType as AgentRole;
+              }
+              return 'architect';
+            })();
             const responseModel = modelOutput?.response_metadata?.model;
             const llmConfig = resolveAgentLlmConfig(config, agentRole);
             const durationMs = chatModelStartTime > 0 ? performance.now() - chatModelStartTime : 0;
@@ -601,13 +628,15 @@ Skip the issuer step — go directly to the reviewer:
   console.log('\u{1F4DD} Architect Summary:');
   console.log(outcome);
 
-  // Discover PR via GitHub API
+  // Discover PRs via GitHub API
   let prNumber: number | null = null;
+  let prNumbers: number[] = [];
   try {
-    const prInfo = await findPrForIssue(config, issueNumber);
-    if (prInfo) {
-      prNumber = prInfo.prNumber;
-      console.log(`\n\u{1F517} Found PR #${prNumber} on branch ${prInfo.branch}`);
+    const prInfos = await findAllPrsForIssue(config, issueNumber);
+    prNumber = prInfos.length > 0 ? prInfos[0].prNumber : null;
+    prNumbers = prInfos.map(p => p.prNumber);
+    for (const prInfo of prInfos) {
+      console.log(`\n\u{1F517} Found PR #${prInfo.prNumber} on branch ${prInfo.branch}`);
     }
   } catch (error) {
     console.warn(`\u{26A0}\uFE0F  Could not discover PR for issue #${issueNumber}: ${error}`);
@@ -616,6 +645,7 @@ Skip the issuer step — go directly to the reviewer:
   return {
     issueNumber,
     prNumber,
+    prNumbers,
     outcome,
   };
 }

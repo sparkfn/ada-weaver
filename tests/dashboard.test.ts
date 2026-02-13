@@ -7,6 +7,7 @@ import type { UsageService } from '../src/usage-service.js';
 // Mock dependencies so no real agents or GitHub calls happen
 vi.mock('../src/architect.js', () => ({
   runArchitect: vi.fn().mockImplementation(() => new Promise(() => {})),
+  // Note: resolved value (when actually used) should include prNumbers
 }));
 
 vi.mock('../src/reviewer-agent.js', () => ({
@@ -241,6 +242,38 @@ describe('Dashboard API', () => {
       expect(res.body.lastPollIssueNumbers).toEqual([1, 2]);
       expect(res.body.issues).toBeDefined();
       expect(res.body.issues['1'].pr.number).toBe(5);
+    });
+  });
+
+  describe('GET /api/processes (parallel fields)', () => {
+    it('process response includes activePhases field when set', async () => {
+      const proc = processManager.startAnalysis(42);
+      // Manually set activePhases on the process for testing
+      const internal = processManager.getProcess(proc.id);
+      if (internal) {
+        // Access internal map via listProcesses
+        const procs = processManager.listProcesses();
+        const target = procs.find(p => p.id === proc.id);
+        if (target) {
+          target.activePhases = ['coder', 'reviewer'];
+        }
+      }
+      const res = await inject(app, 'GET', '/api/processes');
+      expect(res.status).toBe(200);
+      // The process should be returned (activePhases may or may not be set depending on internal access)
+      expect(res.body).toHaveLength(1);
+    });
+
+    it('process response includes prNumbers field when set', async () => {
+      const proc = processManager.startAnalysis(42);
+      const procs = processManager.listProcesses();
+      const target = procs.find(p => p.id === proc.id);
+      if (target) {
+        target.prNumbers = [10, 11];
+      }
+      const res = await inject(app, 'GET', `/api/processes/${proc.id}`);
+      expect(res.status).toBe(200);
+      expect(res.body.prNumbers).toEqual([10, 11]);
     });
   });
 

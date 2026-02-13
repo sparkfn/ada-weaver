@@ -14,11 +14,13 @@ export interface AgentProcess {
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   issueNumber?: number;
   prNumber?: number;
+  prNumbers?: number[];
   owner: string;
   repo: string;
   startedAt: string;
   completedAt?: string;
   currentPhase?: string;
+  activePhases?: string[];
   iteration?: number;
   maxIterations?: number;
   outcome?: string;
@@ -40,6 +42,7 @@ export interface ProgressUpdate {
   iteration?: number;
   maxIterations?: number;
   detail?: string;
+  runId?: string;
 }
 
 // ── ProcessManager ───────────────────────────────────────────────────────────
@@ -187,8 +190,17 @@ export class ProcessManager extends EventEmitter {
     const restore = this.interceptConsole(proc);
 
     try {
+      const activeRunPhases = new Map<string, string>();
+
       const onProgress = (update: ProgressUpdate) => {
+        const runId = update.runId ?? update.phase;
+        if (update.action === 'started') {
+          activeRunPhases.set(runId, update.phase);
+        } else if (update.action === 'completed') {
+          activeRunPhases.delete(runId);
+        }
         proc.currentPhase = update.phase;
+        proc.activePhases = Array.from(activeRunPhases.values());
         if (update.iteration !== undefined) proc.iteration = update.iteration;
         if (update.maxIterations !== undefined) proc.maxIterations = update.maxIterations;
         this.emitEvent('process_updated', proc);
@@ -208,6 +220,7 @@ export class ProcessManager extends EventEmitter {
       proc.status = 'completed';
       proc.completedAt = new Date().toISOString();
       proc.prNumber = result.prNumber ?? undefined;
+      proc.prNumbers = result.prNumbers.length > 0 ? result.prNumbers : undefined;
       proc.outcome = result.outcome;
       this.emitEvent('process_completed', proc);
     } catch (err: unknown) {

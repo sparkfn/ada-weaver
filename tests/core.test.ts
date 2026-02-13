@@ -11,6 +11,7 @@ import {
   isShuttingDown,
   resetShutdown,
   deduplicateIssueHierarchy,
+  findAllPrsForIssue,
 } from '../src/core.js';
 import type { IssueActions, PollState, IssueData } from '../src/core.js';
 import { createGitHubClient } from '../src/github-tools.js';
@@ -25,7 +26,7 @@ vi.mock('../src/github-tools.js', async (importOriginal) => {
 
 vi.mock('../src/architect.js', () => ({
   runArchitect: vi.fn().mockResolvedValue({
-    issueNumber: 0, prNumber: null, outcome: 'done',
+    issueNumber: 0, prNumber: null, prNumbers: [], outcome: 'done',
   }),
 }));
 
@@ -482,5 +483,69 @@ describe('deduplicateIssueHierarchy', () => {
     const result = deduplicateIssueHierarchy([parent]);
     expect(result).toHaveLength(1);
     expect(result[0].number).toBe(1);
+  });
+});
+
+// ── findAllPrsForIssue ────────────────────────────────────────────────────────
+
+describe('findAllPrsForIssue', () => {
+  let mockOctokit: any;
+
+  beforeEach(() => {
+    mockOctokit = {
+      rest: {
+        pulls: {
+          list: vi.fn().mockResolvedValue({ data: [] }),
+        },
+      },
+    };
+    vi.mocked(createGitHubClient).mockReturnValue(mockOctokit as any);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+
+  it('returns all matching PRs when multiple match', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        { number: 10, title: 'Fix #5: part A', head: { ref: 'issue-5-part-a' } },
+        { number: 11, title: 'Fix #5: part B', head: { ref: 'issue-5-part-b' } },
+        { number: 20, title: 'Unrelated PR', head: { ref: 'feature-foo' } },
+      ],
+    });
+
+    const result = await findAllPrsForIssue(config, 5);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({ prNumber: 10, branch: 'issue-5-part-a' });
+    expect(result[1]).toEqual({ prNumber: 11, branch: 'issue-5-part-b' });
+  });
+
+  it('returns empty array when no PRs match', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        { number: 10, title: 'Unrelated PR', head: { ref: 'feature-foo' } },
+      ],
+    });
+
+    const result = await findAllPrsForIssue(config, 99);
+
+    expect(result).toEqual([]);
+  });
+
+  it('returns single-item array for one match', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        { number: 15, title: 'Fix #7: something', head: { ref: 'issue-7-fix' } },
+      ],
+    });
+
+    const result = await findAllPrsForIssue(config, 7);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ prNumber: 15, branch: 'issue-7-fix' });
   });
 });

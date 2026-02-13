@@ -31,7 +31,7 @@ When an issue is opened, the **Architect** supervisor coordinates three speciali
 2. **Coder** — comments on issue, creates branch, commits files, opens draft PR
 3. **Reviewer** — fetches PR diff, reads source for context, posts review (COMMENT only)
 
-The Architect makes all orchestration decisions via LLM reasoning — non-deterministic workflow. It can skip steps, reorder, or iterate (reviewer finds issues → coder fixes → re-review).
+The Architect makes all orchestration decisions via LLM reasoning — non-deterministic workflow. It can skip steps, reorder, iterate (reviewer finds issues → coder fixes → re-review), or run subagents in parallel when tasks are independent (e.g., multiple coders on separate branches).
 
 The agent never merges PRs. It only proposes fixes as drafts. The reviewer agent posts a COMMENT review -- it never approves or requests changes.
 
@@ -490,7 +490,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-338 tests across 11 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+408 tests across 14 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 

@@ -441,6 +441,40 @@ export async function findPrForIssue(
 }
 
 /**
+ * Find ALL PRs created for a given issue number.
+ * Looks for PRs matching "Fix #N:" in title or "issue-N-" in branch name.
+ * Returns an array of all matches (empty if none found).
+ */
+export async function findAllPrsForIssue(
+  config: Config,
+  issueNumber: number,
+): Promise<Array<{ prNumber: number; branch: string }>> {
+  const { owner, repo } = config.github;
+  const octokit = createGitHubClient(getAuthFromConfig(config.github));
+
+  const { data: prs } = await octokit.rest.pulls.list({
+    owner,
+    repo,
+    state: 'open',
+    per_page: 30,
+    sort: 'created',
+    direction: 'desc',
+  });
+
+  const matches: Array<{ prNumber: number; branch: string }> = [];
+
+  for (const pr of prs) {
+    const titleMatch = pr.title.includes(`Fix #${issueNumber}:`);
+    const branchMatch = pr.head.ref.startsWith(`issue-${issueNumber}-`);
+    if (titleMatch || branchMatch) {
+      matches.push({ prNumber: pr.number, branch: pr.head.ref });
+    }
+  }
+
+  return matches;
+}
+
+/**
  * Show current polling status (last run time, processed issues).
  */
 export function showStatus(config: Config): void {

@@ -37,6 +37,7 @@ describe('ProcessManager', () => {
       vi.mocked(runArchitect).mockResolvedValue({
         issueNumber: 42,
         prNumber: 99,
+        prNumbers: [99],
         outcome: 'Done',
       });
 
@@ -56,6 +57,7 @@ describe('ProcessManager', () => {
       vi.mocked(runArchitect).mockResolvedValue({
         issueNumber: 42,
         prNumber: null,
+        prNumbers: [],
         outcome: 'Done',
       });
 
@@ -73,6 +75,7 @@ describe('ProcessManager', () => {
       vi.mocked(runArchitect).mockResolvedValue({
         issueNumber: 42,
         prNumber: 99,
+        prNumbers: [99],
         outcome: 'All good',
       });
 
@@ -127,6 +130,7 @@ describe('ProcessManager', () => {
       vi.mocked(runArchitect).mockResolvedValue({
         issueNumber: 20,
         prNumber: 21,
+        prNumbers: [21],
         outcome: 'Fixed',
       });
 
@@ -208,6 +212,7 @@ describe('ProcessManager', () => {
       vi.mocked(runArchitect).mockResolvedValue({
         issueNumber: 42,
         prNumber: null,
+        prNumbers: [],
         outcome: 'Done',
       });
 
@@ -283,11 +288,67 @@ describe('ProcessManager', () => {
     });
   });
 
+  describe('concurrent phase tracking', () => {
+    it('tracks activePhases via progress callback', async () => {
+      let capturedOnProgress: ((update: any) => void) | undefined;
+
+      vi.mocked(runArchitect).mockImplementation(async (_config, _issue, opts) => {
+        capturedOnProgress = opts?.onProgress;
+        // Simulate two concurrent subagents starting
+        opts?.onProgress?.({ phase: 'coder', action: 'started', runId: 'run-1' });
+        opts?.onProgress?.({ phase: 'coder', action: 'started', runId: 'run-2' });
+        // Then one completes
+        opts?.onProgress?.({ phase: 'coder', action: 'completed', runId: 'run-1' });
+        return { issueNumber: 42, prNumber: null, prNumbers: [], outcome: 'Done' };
+      });
+
+      const events: ProcessEvent[] = [];
+      pm.on('process_event', (e) => events.push(e));
+
+      pm.startAnalysis(42);
+
+      await vi.waitFor(() => {
+        expect(events.some(e => e.type === 'process_completed')).toBe(true);
+      });
+
+      // After both started, activePhases should have had two entries
+      const updateEvents = events.filter(e => e.type === 'process_updated');
+      // The second started event should show 2 active phases
+      expect(updateEvents.length).toBeGreaterThanOrEqual(3);
+      const secondStart = updateEvents[1];
+      expect(secondStart.process.activePhases).toEqual(['coder', 'coder']);
+      // After one completed, should have 1 remaining
+      const afterComplete = updateEvents[2];
+      expect(afterComplete.process.activePhases).toEqual(['coder']);
+    });
+
+    it('sets prNumbers from result', async () => {
+      vi.mocked(runArchitect).mockResolvedValue({
+        issueNumber: 42,
+        prNumber: 10,
+        prNumbers: [10, 11],
+        outcome: 'Done',
+      });
+
+      const events: ProcessEvent[] = [];
+      pm.on('process_event', (e) => events.push(e));
+
+      pm.startAnalysis(42);
+
+      await vi.waitFor(() => {
+        expect(events.some(e => e.type === 'process_completed')).toBe(true);
+      });
+
+      const completed = events.find(e => e.type === 'process_completed')!;
+      expect(completed.process.prNumbers).toEqual([10, 11]);
+    });
+  });
+
   describe('log capture', () => {
     it('emits process_log events during execution', async () => {
       vi.mocked(runArchitect).mockImplementation(async () => {
         console.log('Test log line');
-        return { issueNumber: 42, prNumber: null, outcome: 'Done' };
+        return { issueNumber: 42, prNumber: null, prNumbers: [], outcome: 'Done' };
       });
 
       const logEvents: ProcessEvent[] = [];

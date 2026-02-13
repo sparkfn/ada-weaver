@@ -91,10 +91,26 @@
 
     // ── PhaseTimeline ──────────────────────────────────────────────────────────
 
-    function PhaseTimeline({ currentPhase, status }) {
+    function PhaseTimeline({ currentPhase, activePhases, status }) {
       const phases = ['issuer', 'coder', 'reviewer'];
       const activeIdx = phases.indexOf(currentPhase || '');
       const done = status === 'completed' || status === 'failed' || status === 'cancelled';
+      const concurrent = activePhases && activePhases.length > 1;
+
+      if (concurrent) {
+        return h(Box, { sx: { display: 'flex', gap: 1, my: 2, justifyContent: 'center', flexWrap: 'wrap' } },
+          [...new Set(activePhases)].map((phase) =>
+            h(Chip, {
+              key: phase,
+              label: `${phase} (x${activePhases.filter(p => p === phase).length})`,
+              color: 'info',
+              size: 'small',
+              icon: h(CircularProgress, { size: 14, color: 'inherit' }),
+              sx: { fontWeight: 500 },
+            })
+          )
+        );
+      }
 
       return h(Stepper, { activeStep: done ? phases.length : activeIdx, alternativeLabel: true, sx: { my: 2 } },
         phases.map((phase) =>
@@ -209,21 +225,34 @@
           h(Typography, { variant: 'body2', color: 'text.secondary' },
             `Duration: ${elapsed || '...'}`
           ),
-          proc.prNumber && proc.type === 'analyze'
+          proc.prNumbers && proc.prNumbers.length > 1 && proc.type === 'analyze'
             ? h(Typography, { variant: 'body2', sx: { mt: 0.5 } },
-                'PR: ',
-                h('a', {
-                  href: `https://github.com/${proc.owner}/${proc.repo}/pull/${proc.prNumber}`,
-                  target: '_blank',
-                  rel: 'noopener',
-                  style: { color: '#7c4dff' },
-                }, `#${proc.prNumber}`)
+                'PRs: ',
+                ...proc.prNumbers.map((n, i) => h(Fragment, { key: n },
+                  i > 0 ? ', ' : null,
+                  h('a', {
+                    href: `https://github.com/${proc.owner}/${proc.repo}/pull/${n}`,
+                    target: '_blank',
+                    rel: 'noopener',
+                    style: { color: '#7c4dff' },
+                  }, `#${n}`)
+                ))
               )
-            : null,
+            : proc.prNumber && proc.type === 'analyze'
+              ? h(Typography, { variant: 'body2', sx: { mt: 0.5 } },
+                  'PR: ',
+                  h('a', {
+                    href: `https://github.com/${proc.owner}/${proc.repo}/pull/${proc.prNumber}`,
+                    target: '_blank',
+                    rel: 'noopener',
+                    style: { color: '#7c4dff' },
+                  }, `#${proc.prNumber}`)
+                )
+              : null,
         ),
 
         proc.type === 'analyze'
-          ? h(PhaseTimeline, { currentPhase: proc.currentPhase, status: proc.status })
+          ? h(PhaseTimeline, { currentPhase: proc.currentPhase, activePhases: proc.activePhases, status: proc.status })
           : null,
 
         proc.iteration && proc.maxIterations
@@ -335,9 +364,15 @@
                   proc.type === 'analyze' ? `Issue #${proc.issueNumber}` : `PR #${proc.prNumber}`
                 ),
                 h(TableCell, null,
-                  proc.currentPhase
-                    ? h(Chip, { label: proc.currentPhase, size: 'small', variant: 'outlined' })
-                    : '\u2014'
+                  proc.activePhases && proc.activePhases.length > 1
+                    ? h(Box, { sx: { display: 'flex', gap: 0.5 } },
+                        [...new Set(proc.activePhases)].map(p =>
+                          h(Chip, { key: p, label: `${p} x${proc.activePhases.filter(x => x === p).length}`, size: 'small', variant: 'outlined' })
+                        )
+                      )
+                    : proc.currentPhase
+                      ? h(Chip, { label: proc.currentPhase, size: 'small', variant: 'outlined' })
+                      : '\u2014'
                 ),
                 h(TableCell, null, h(ElapsedTime, { startedAt: proc.startedAt, completedAt: proc.completedAt, status: proc.status })),
                 h(TableCell, { align: 'right' },

@@ -251,7 +251,11 @@ async function main() {
       console.log('\n' + '\u{2500}'.repeat(60));
       console.log('\u{1F4CB} Architect summary:');
       console.log(`   Issue:   #${result.issueNumber}`);
-      console.log(`   PR:      ${result.prNumber ? `#${result.prNumber}` : 'none'}`);
+      if (result.prNumbers.length > 1) {
+        console.log(`   PRs:     ${result.prNumbers.map(n => `#${n}`).join(', ')}`);
+      } else {
+        console.log(`   PR:      ${result.prNumber ? `#${result.prNumber}` : 'none'}`);
+      }
       break;
     }
 
@@ -295,7 +299,11 @@ async function main() {
       console.log('\n' + '\u{2500}'.repeat(60));
       console.log('\u{1F4CB} Continue summary:');
       console.log(`   Issue:   #${contResult.issueNumber}`);
-      console.log(`   PR:      ${contResult.prNumber ? `#${contResult.prNumber}` : 'none'}`);
+      if (contResult.prNumbers.length > 1) {
+        console.log(`   PRs:     ${contResult.prNumbers.map(n => `#${n}`).join(', ')}`);
+      } else {
+        console.log(`   PR:      ${contResult.prNumber ? `#${contResult.prNumber}` : 'none'}`);
+      }
       break;
     }
 

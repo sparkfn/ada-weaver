@@ -7,8 +7,11 @@ import {
   handlePullRequestEvent,
   handleWebhookEvent,
   handleIssuesEvent,
+  handleIssueCommentEvent,
+  extractPromptCommand,
   isBotPr,
   BOT_PR_MARKER,
+  PROMPT_TRIGGER,
 } from '../src/listener.js';
 import type { WebhookConfig, WebhookEvent } from '../src/listener.js';
 
@@ -29,6 +32,16 @@ vi.mock('../src/reviewer-agent.js', () => ({
 vi.mock('../src/chat-agent.js', () => ({
   chat: vi.fn().mockResolvedValue({ response: 'mock response', sessionId: 'test-session' }),
   chatStream: vi.fn(),
+}));
+
+const mockPullsGet = vi.fn();
+vi.mock('../src/github-tools.js', () => ({
+  createGitHubClient: vi.fn(() => ({
+    rest: {
+      pulls: { get: mockPullsGet },
+    },
+  })),
+  getAuthFromConfig: vi.fn(() => 'mock-token'),
 }));
 
 import { runArchitect } from '../src/architect.js';
@@ -532,6 +545,26 @@ describe('handleWebhookEvent', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Issue #1'));
   });
 
+  it('dispatches issue_comment events', () => {
+    const event: WebhookEvent = {
+      event: 'issue_comment',
+      deliveryId: 'dispatch-4',
+      payload: {
+        action: 'created',
+        comment: { body: '/prompt fix the tests' },
+        issue: {
+          number: 10,
+          title: 'Fix #5: update logic',
+          body: BOT_PR_MARKER,
+          pull_request: { url: 'https://api.github.com/repos/o/r/pulls/10' },
+        },
+      },
+    };
+
+    // Should not throw — fires and forgets
+    handleWebhookEvent(event);
+  });
+
   it('ignores unhandled event types without error', () => {
     const event: WebhookEvent = {
       event: 'push',
@@ -629,6 +662,228 @@ describe('handleIssuesEvent', () => {
       expect.stringContaining('Architect failed'),
       expect.any(Error),
     );
+  });
+});
+
+// ── extractPromptCommand ─────────────────────────────────────────────────────
+
+describe('extractPromptCommand', () => {
+  it('extracts instructions from "/prompt fix the bug"', () => {
+    expect(extractPromptCommand('/prompt fix the bug')).toBe('fix the bug');
+  });
+
+  it('returns null when no /prompt is present', () => {
+    expect(extractPromptCommand('Just a regular comment')).toBeNull();
+  });
+
+  it('handles /prompt with leading whitespace', () => {
+    expect(extractPromptCommand('  /prompt update the tests')).toBe('update the tests');
+  });
+
+  it('handles /prompt in the middle of a comment', () => {
+    expect(extractPromptCommand('Hey team\n/prompt fix validation\nThanks!')).toBe('fix validation');
+  });
+
+  it('returns null when /prompt has no instructions', () => {
+    expect(extractPromptCommand('/prompt')).toBeNull();
+  });
+
+  it('returns null when /prompt has only whitespace after', () => {
+    expect(extractPromptCommand('/prompt   ')).toBeNull();
+  });
+
+  it('takes text after /prompt to end of that line only', () => {
+    const result = extractPromptCommand('/prompt fix line one\nThis is line two');
+    expect(result).toBe('fix line one');
+  });
+});
+
+// ── handleIssueCommentEvent ─────────────────────────────────────────────────
+
+describe('handleIssueCommentEvent', () => {
+  const mockConfig = {
+    github: { owner: 'o', repo: 'r', token: 't' },
+    llm: { provider: 'anthropic', apiKey: 'k', model: 'm' },
+  } as any;
+
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(runArchitect).mockReset().mockResolvedValue({
+      issueNumber: 42, prNumber: 99, prNumbers: [99], outcome: 'done',
+    });
+    mockPullsGet.mockReset().mockResolvedValue({
+      data: {
+        head: { ref: 'issue-42-fix-login' },
+        body: `Some text\n${BOT_PR_MARKER}\nCloses #42`,
+      },
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeEvent(payload: Record<string, unknown>): WebhookEvent {
+    return { event: 'issue_comment', deliveryId: 'test-delivery', payload };
+  }
+
+  function makeCommentPayload(opts: {
+    action?: string;
+    commentBody?: string;
+    issueNumber?: number;
+    issueTitle?: string;
+    issueBody?: string;
+    hasPullRequest?: boolean;
+  } = {}): Record<string, unknown> {
+    return {
+      action: opts.action ?? 'created',
+      comment: {
+        body: opts.commentBody ?? '/prompt fix the validation for negative numbers',
+      },
+      issue: {
+        number: opts.issueNumber ?? 99,
+        title: opts.issueTitle ?? 'Fix #42: improve login',
+        body: opts.issueBody ?? `Description\n${BOT_PR_MARKER}`,
+        ...(opts.hasPullRequest !== false ? { pull_request: { url: 'https://api.github.com/repos/o/r/pulls/99' } } : {}),
+      },
+    };
+  }
+
+  it('triggers on issue_comment.created with /prompt on a bot PR', async () => {
+    const event = makeEvent(makeCommentPayload());
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(true);
+    expect(result.prNumber).toBe(99);
+    expect(result.issueNumber).toBe(42);
+    expect(result.reason).toBe('Prompt triggered');
+    expect(runArchitect).toHaveBeenCalledWith(mockConfig, 42, {
+      continueContext: {
+        prNumber: 99,
+        branchName: 'issue-42-fix-login',
+        humanFeedback: 'fix the validation for negative numbers',
+      },
+    });
+  });
+
+  it('ignores non-created actions (edited)', async () => {
+    const event = makeEvent(makeCommentPayload({ action: 'edited' }));
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Ignored action: edited');
+    expect(runArchitect).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-created actions (deleted)', async () => {
+    const event = makeEvent(makeCommentPayload({ action: 'deleted' }));
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Ignored action: deleted');
+  });
+
+  it('ignores comments on regular issues (no pull_request field)', async () => {
+    const event = makeEvent(makeCommentPayload({ hasPullRequest: false }));
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Not a PR comment');
+    expect(runArchitect).not.toHaveBeenCalled();
+  });
+
+  it('ignores comments without /prompt', async () => {
+    const event = makeEvent(makeCommentPayload({ commentBody: 'Looks good to me!' }));
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('No /prompt command');
+    expect(runArchitect).not.toHaveBeenCalled();
+  });
+
+  it('ignores comments on non-bot PRs', async () => {
+    mockPullsGet.mockResolvedValue({
+      data: {
+        head: { ref: 'feature/my-change' },
+        body: 'Regular PR from a human',
+      },
+    });
+    const event = makeEvent(makeCommentPayload());
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe('PR not created by bot');
+    expect(runArchitect).not.toHaveBeenCalled();
+  });
+
+  it('skips analysis when no config is provided', async () => {
+    const event = makeEvent(makeCommentPayload());
+    const result = await handleIssueCommentEvent(event);
+
+    expect(result.handled).toBe(true);
+    expect(result.prNumber).toBe(99);
+    expect(result.reason).toContain('skipped');
+    expect(runArchitect).not.toHaveBeenCalled();
+  });
+
+  it('handles errors gracefully when Architect fails', async () => {
+    vi.mocked(runArchitect).mockRejectedValue(new Error('LLM down'));
+    const event = makeEvent(makeCommentPayload());
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(true);
+    expect(result.issueNumber).toBe(42);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Architect failed'),
+      expect.any(Error),
+    );
+  });
+
+  it('handles errors when PR fetch fails', async () => {
+    mockPullsGet.mockRejectedValue(new Error('API error'));
+    const event = makeEvent(makeCommentPayload());
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Failed to fetch PR details');
+    expect(runArchitect).not.toHaveBeenCalled();
+  });
+
+  it('extracts issue number from branch name when title has no Fix #N pattern', async () => {
+    mockPullsGet.mockResolvedValue({
+      data: {
+        head: { ref: 'issue-55-add-feature' },
+        body: `${BOT_PR_MARKER}`,
+      },
+    });
+    const event = makeEvent(makeCommentPayload({
+      issueTitle: 'Add feature for users',
+    }));
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(true);
+    expect(result.issueNumber).toBe(55);
+    expect(runArchitect).toHaveBeenCalledWith(mockConfig, 55, expect.objectContaining({
+      continueContext: expect.objectContaining({ branchName: 'issue-55-add-feature' }),
+    }));
+  });
+
+  it('returns error when issue number cannot be extracted', async () => {
+    mockPullsGet.mockResolvedValue({
+      data: {
+        head: { ref: 'feature/custom-branch' },
+        body: `${BOT_PR_MARKER}`,
+      },
+    });
+    const event = makeEvent(makeCommentPayload({
+      issueTitle: 'No issue reference here',
+    }));
+    const result = await handleIssueCommentEvent(event, mockConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Could not extract issue number');
+    expect(runArchitect).not.toHaveBeenCalled();
   });
 });
 

@@ -59,7 +59,7 @@ export class ProcessManager extends EventEmitter {
     this.usageService = usageService;
   }
 
-  continueAnalysis(issueNumber: number, prNumber: number, branchName: string): AgentProcess {
+  continueAnalysis(issueNumber: number, prNumber: number, branchName: string, humanFeedback?: string): AgentProcess {
     const id = `continue-${issueNumber}-${Date.now()}`;
     const proc: AgentProcess = {
       id,
@@ -80,7 +80,7 @@ export class ProcessManager extends EventEmitter {
     this.emitEvent('process_started', proc);
 
     this.runAnalysis(proc, controller.signal, {
-      continueContext: { prNumber, branchName },
+      continueContext: { prNumber, branchName, humanFeedback },
     }).catch(() => {});
 
     return { ...proc };

@@ -33,6 +33,25 @@ export interface WebhookEvent {
 /** Marker that identifies PRs created by this bot. */
 export const BOT_PR_MARKER = '<!-- deep-agent-pr -->';
 
+/** The trigger keyword that activates the bot from PR comments. */
+export const PROMPT_TRIGGER = '/prompt';
+
+/**
+ * Extract the instructions text from a comment body containing `/prompt`.
+ * Returns the text after `/prompt` to the end of that line, or null if not found.
+ */
+export function extractPromptCommand(commentBody: string): string | null {
+  const lines = commentBody.split('\n');
+  for (const line of lines) {
+    const idx = line.indexOf(PROMPT_TRIGGER);
+    if (idx !== -1) {
+      const after = line.slice(idx + PROMPT_TRIGGER.length).trim();
+      return after || null;
+    }
+  }
+  return null;
+}
+
 /** Branch naming pattern used by the bot: issue-N-description */
 const BOT_BRANCH_RE = /^issue-\d+-/;
 
@@ -230,6 +249,126 @@ export async function handleIssuesEvent(event: WebhookEvent, config?: Config): P
 }
 
 /**
+ * Result of handling an issue_comment event (for /prompt commands on bot PRs).
+ */
+export interface IssueCommentHandlerResult {
+  handled: boolean;
+  prNumber?: number;
+  issueNumber?: number;
+  reason: string;
+}
+
+/**
+ * Handle an issue_comment.created webhook event.
+ *
+ * When a human comments `/prompt <instructions>` on a bot-created PR,
+ * triggers the Architect's review→fix cycle with the human's instructions.
+ *
+ * GitHub sends PR comments as issue_comment events — the `pull_request`
+ * field on `payload.issue` distinguishes them from regular issue comments.
+ */
+export async function handleIssueCommentEvent(event: WebhookEvent, config?: Config): Promise<IssueCommentHandlerResult> {
+  const { payload } = event;
+
+  if (payload.action !== 'created') {
+    return { handled: false, reason: `Ignored action: ${payload.action}` };
+  }
+
+  // GitHub sends PR comments as issue_comment events —
+  // the pull_request field on the issue object distinguishes them.
+  const issue = payload.issue as Record<string, unknown> | undefined;
+  if (!issue || !issue.pull_request) {
+    return { handled: false, reason: 'Not a PR comment (no pull_request field)' };
+  }
+
+  const comment = payload.comment as Record<string, unknown> | undefined;
+  const commentBody = (comment?.body as string) ?? '';
+  const instructions = extractPromptCommand(commentBody);
+  if (!instructions) {
+    return { handled: false, reason: 'No /prompt command found in comment' };
+  }
+
+  const prNumber = issue.number as number;
+  const prBody = (issue.body as string) ?? '';
+
+  if (!config) {
+    console.log(`[webhook] No config provided, skipping /prompt for PR #${prNumber}`);
+    return { handled: true, prNumber, reason: 'No config — analysis skipped' };
+  }
+
+  // Fetch PR details (branch name) via the GitHub API since issue_comment
+  // payloads don't include head ref.
+  const { owner, repo } = config.github;
+  const octokit = createGitHubClient(getAuthFromConfig(config.github));
+
+  let branchName: string;
+  try {
+    const { data: prData } = await octokit.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: prNumber,
+    });
+    branchName = prData.head.ref;
+
+    // Check if this is a bot PR using the full body + branch
+    if (!isBotPr(prData.body ?? '', branchName)) {
+      console.log(
+        `[webhook] PR #${prNumber} not created by bot, ignoring /prompt ` +
+        `(delivery: ${event.deliveryId})`,
+      );
+      return { handled: true, prNumber, reason: 'PR not created by bot' };
+    }
+  } catch (err) {
+    console.error(`[webhook] Failed to fetch PR #${prNumber}:`, err);
+    return { handled: false, prNumber, reason: 'Failed to fetch PR details' };
+  }
+
+  // Extract issue number from PR title ("Fix #N:") or branch name ("issue-N-")
+  let issueNumber: number | undefined;
+  // Try PR title first
+  const prTitle = (issue.title as string) ?? '';
+  const titleMatch = prTitle.match(/Fix\s+#(\d+):/i);
+  if (titleMatch) {
+    issueNumber = parseInt(titleMatch[1], 10);
+  }
+  // Fall back to branch name
+  if (!issueNumber) {
+    const branchMatch = branchName.match(/^issue-(\d+)-/);
+    if (branchMatch) {
+      issueNumber = parseInt(branchMatch[1], 10);
+    }
+  }
+
+  if (!issueNumber) {
+    console.error(
+      `[webhook] Could not extract issue number from PR #${prNumber} ` +
+      `(title: "${prTitle}", branch: "${branchName}")`,
+    );
+    return { handled: false, prNumber, reason: 'Could not extract issue number' };
+  }
+
+  console.log(
+    `[webhook] /prompt on PR #${prNumber} for issue #${issueNumber}: "${instructions}" ` +
+    `(delivery: ${event.deliveryId})`,
+  );
+
+  // Fire-and-forget: run Architect with human feedback context
+  try {
+    const result = await runArchitect(config, issueNumber, {
+      continueContext: { prNumber, branchName, humanFeedback: instructions },
+    });
+    console.log(
+      `[webhook] Architect complete for /prompt on PR #${prNumber}` +
+      `${result.prNumber ? `, PR #${result.prNumber}` : ''}`,
+    );
+  } catch (err) {
+    console.error(`[webhook] Architect failed for /prompt on PR #${prNumber}:`, err);
+  }
+
+  return { handled: true, prNumber, issueNumber, reason: 'Prompt triggered' };
+}
+
+/**
  * Dispatch a parsed webhook event to the appropriate handler.
  * Config is optional — when provided, issues.opened events trigger analysis.
  */
@@ -246,6 +385,14 @@ export function handleWebhookEvent(event: WebhookEvent, config?: Config): void {
     // Fire-and-forget — don't await, just log errors
     handleIssuesEvent(event, config).catch((err) => {
       console.error(`[webhook] Issues handler error:`, err);
+    });
+    return;
+  }
+
+  if (event.event === 'issue_comment') {
+    // Fire-and-forget — don't await, just log errors
+    handleIssueCommentEvent(event, config).catch((err) => {
+      console.error(`[webhook] Issue comment handler error:`, err);
     });
     return;
   }

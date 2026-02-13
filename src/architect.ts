@@ -425,6 +425,7 @@ export function getMaxIterations(config: Config): number {
 export interface ContinueContext {
   prNumber: number;
   branchName: string;
+  humanFeedback?: string;
 }
 
 export async function runArchitect(
@@ -453,7 +454,7 @@ export async function runArchitect(
 
   let userMessage: string;
   if (options.continueContext) {
-    const { prNumber, branchName } = options.continueContext;
+    const { prNumber, branchName, humanFeedback } = options.continueContext;
     userMessage = `Continue working on issue #${issueNumber}. A PR #${prNumber} already exists on branch "${branchName}".
 
 Skip the issuer step — go directly to the reviewer:
@@ -462,6 +463,9 @@ Skip the issuer step — go directly to the reviewer:
 3. Then delegate to reviewer again.
 4. Repeat the review→fix cycle up to the iteration limit.
 5. Report the final outcome.`;
+    if (humanFeedback) {
+      userMessage += `\n\nIMPORTANT — A human reviewer left the following feedback on this PR. Make sure the coder addresses this in addition to any reviewer feedback:\n\n${humanFeedback}`;
+    }
   } else {
     userMessage = `Process issue #${issueNumber}. Delegate to your team to understand, implement, and review a fix for this issue.`;
   }

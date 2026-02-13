@@ -5,6 +5,7 @@ import {
   createCoderSubagent,
   createReviewerSubagent,
   getMaxIterations,
+  extractTaskInput,
 } from '../src/architect.js';
 
 // ── buildArchitectSystemPrompt ──────────────────────────────────────────────
@@ -243,5 +244,82 @@ describe('getMaxIterations', () => {
 
   it('returns default when config value is undefined', () => {
     expect(getMaxIterations({ maxIterations: undefined } as any)).toBe(3);
+  });
+});
+
+// ── extractTaskInput ──────────────────────────────────────────────────────
+
+describe('extractTaskInput', () => {
+  it('extracts from direct object at data.input', () => {
+    const result = extractTaskInput({ input: { subagent_type: 'coder', description: 'fix it' } });
+    expect(result).toEqual({ subagentType: 'coder', description: 'fix it' });
+  });
+
+  it('extracts from JSON string at data.input', () => {
+    const result = extractTaskInput({ input: '{"subagent_type":"issuer","description":"analyze"}' });
+    expect(result).toEqual({ subagentType: 'issuer', description: 'analyze' });
+  });
+
+  it('extracts from nested args: data.input.args', () => {
+    const result = extractTaskInput({ input: { args: { subagent_type: 'reviewer', description: 'review PR' } } });
+    expect(result).toEqual({ subagentType: 'reviewer', description: 'review PR' });
+  });
+
+  it('extracts from double-nested: data.input.input (object)', () => {
+    const result = extractTaskInput({ input: { input: { subagent_type: 'coder', description: 'impl' } } });
+    expect(result).toEqual({ subagentType: 'coder', description: 'impl' });
+  });
+
+  it('extracts from double-nested: data.input.input (JSON string) — LangGraph actual format', () => {
+    // This is the actual format from LangGraph's streamEvents v2:
+    // handleToolStart stringifies args, BaseTracer wraps as { input: str }
+    const result = extractTaskInput({
+      input: { input: '{"subagent_type":"coder","description":"implement the fix"}' },
+    });
+    expect(result).toEqual({ subagentType: 'coder', description: 'implement the fix' });
+  });
+
+  it('extracts from nested args as JSON string: data.input.args', () => {
+    const result = extractTaskInput({
+      input: { args: '{"subagent_type":"reviewer","description":"check PR"}' },
+    });
+    expect(result).toEqual({ subagentType: 'reviewer', description: 'check PR' });
+  });
+
+  it('extracts from tool_input wrapper: data.input.tool_input (object)', () => {
+    const result = extractTaskInput({ input: { tool_input: { subagent_type: 'issuer', description: 'brief' } } });
+    expect(result).toEqual({ subagentType: 'issuer', description: 'brief' });
+  });
+
+  it('extracts from tool_input wrapper: data.input.tool_input (JSON string)', () => {
+    const result = extractTaskInput({
+      input: { tool_input: '{"subagent_type":"issuer","description":"analyze issue"}' },
+    });
+    expect(result).toEqual({ subagentType: 'issuer', description: 'analyze issue' });
+  });
+
+  it('falls back to JSON.stringify search when nested deeply', () => {
+    const result = extractTaskInput({ input: { wrapper: { deep: { subagent_type: 'coder', description: 'deep' } } } });
+    expect(result.subagentType).toBe('coder');
+  });
+
+  it('returns unknown when data is undefined', () => {
+    const result = extractTaskInput(undefined);
+    expect(result.subagentType).toBe('unknown');
+  });
+
+  it('returns unknown when data.input is empty object', () => {
+    const result = extractTaskInput({ input: {} });
+    expect(result.subagentType).toBe('unknown');
+  });
+
+  it('returns unknown when data.input is invalid JSON string', () => {
+    const result = extractTaskInput({ input: 'not-json' });
+    expect(result.subagentType).toBe('unknown');
+  });
+
+  it('defaults description to empty string when missing', () => {
+    const result = extractTaskInput({ input: { subagent_type: 'coder' } });
+    expect(result).toEqual({ subagentType: 'coder', description: '' });
   });
 });

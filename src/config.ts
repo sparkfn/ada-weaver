@@ -61,6 +61,7 @@ export function loadConfig() {
       model: process.env.LLM_MODEL,
       baseUrl: process.env.LLM_BASE_URL || null,
     },
+    port: parseIntEnv('PORT'),
     maxIssuesPerRun: parseIntEnv('MAX_ISSUES_PER_RUN'),
     maxToolCallsPerRun: parseIntEnv('MAX_TOOL_CALLS_PER_RUN'),
     maxIterations: parseIntEnv('MAX_ITERATIONS') ?? parseIntEnv('MAX_FEEDBACK_ITERATIONS'),

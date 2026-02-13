@@ -48,6 +48,101 @@ interface SubagentRun {
   label: string;
 }
 
+// ── Event input extraction ───────────────────────────────────────────────────
+
+/**
+ * Extract subagent_type and description from a streamEvents `on_tool_start`
+ * event's data payload.  The structure varies across LangGraph / deepagents
+ * versions — try multiple paths before falling back to 'unknown'.
+ */
+export function extractTaskInput(data: any): { subagentType: string; description: string } {
+  const tryExtract = (obj: any): { subagentType: string; description: string } | null => {
+    if (obj && typeof obj === 'object' && typeof obj.subagent_type === 'string') {
+      return { subagentType: obj.subagent_type, description: obj.description ?? '' };
+    }
+    return null;
+  };
+
+  const tryParse = (val: any): Record<string, any> | null => {
+    if (typeof val === 'string') {
+      try { return JSON.parse(val); } catch { return null; }
+    }
+    return null;
+  };
+
+  // LangGraph's on_tool_start sets ev.data = { input: run.inputs }
+  // where run.inputs = { input: JSON.stringify(toolArgs) }.
+  // So the actual path is: ev.data.input.input → JSON string of tool args.
+  const raw = data?.input;
+
+  // 1. Direct object: data.input = { subagent_type, description }
+  const direct = tryExtract(raw);
+  if (direct) return direct;
+
+  // 2. JSON string: data.input = '{"subagent_type":"...","description":"..."}'
+  const parsed = tryParse(raw);
+  if (parsed) {
+    const fromParsed = tryExtract(parsed);
+    if (fromParsed) return fromParsed;
+  }
+
+  // 3–5: Nested structures within data.input (object with sub-keys)
+  if (raw && typeof raw === 'object') {
+    // 3. data.input.args = { subagent_type, description }
+    const fromArgs = tryExtract(raw.args);
+    if (fromArgs) return fromArgs;
+
+    // 3b. data.input.args is a JSON string
+    const parsedArgs = tryParse(raw.args);
+    if (parsedArgs) {
+      const fromParsedArgs = tryExtract(parsedArgs);
+      if (fromParsedArgs) return fromParsedArgs;
+    }
+
+    // 4. data.input.input = { subagent_type, description }
+    const fromNested = tryExtract(raw.input);
+    if (fromNested) return fromNested;
+
+    // 4b. data.input.input is a JSON string (LangGraph's actual format:
+    //     handleToolStart stringifies args, BaseTracer wraps as { input: str })
+    const parsedNested = tryParse(raw.input);
+    if (parsedNested) {
+      const fromParsedNested = tryExtract(parsedNested);
+      if (fromParsedNested) return fromParsedNested;
+    }
+
+    // 5. data.input.tool_input = { subagent_type, description }
+    const fromToolInput = tryExtract(raw.tool_input);
+    if (fromToolInput) return fromToolInput;
+
+    const parsedToolInput = tryParse(raw.tool_input);
+    if (parsedToolInput) {
+      const fromParsedToolInput = tryExtract(parsedToolInput);
+      if (fromParsedToolInput) return fromParsedToolInput;
+    }
+  }
+
+  // 6. Fallback: search the entire data object for subagent_type
+  //    Handle escaped quotes from nested JSON strings (\\")
+  try {
+    const json = JSON.stringify(data ?? {});
+    const match = json.match(/\\?"subagent_type\\?"\s*:\s*\\?"(\w+)\\?"/);
+    if (match) {
+      const descMatch = json.match(/\\?"description\\?"\s*:\s*\\?"([^"\\]{0,200})\\?"/);
+      return { subagentType: match[1], description: descMatch?.[1] ?? '' };
+    }
+  } catch { /* stringify can fail on circular refs */ }
+
+  // Debug: log the actual structure when we can't find subagent_type
+  console.warn(`⚠️  Could not extract subagent_type from task event data. Raw keys: ${
+    raw && typeof raw === 'object' ? Object.keys(raw).join(', ') : typeof raw
+  }. Full data keys: ${
+    data && typeof data === 'object' ? Object.keys(data).join(', ') : typeof data
+  }`);
+
+  return { subagentType: 'unknown', description: '' };
+}
+
 // ── Subagent builders ────────────────────────────────────────────────────────
 
 /**
@@ -489,17 +584,9 @@ Skip the issuer step — go directly to the reviewer:
     if (options.signal?.aborted) break;
 
     if (ev.event === 'on_tool_start' && ev.name === 'task') {
-      // ev.data.input may be a parsed object OR a serialised JSON string
-      // depending on the LangGraph / deepagents version — handle both.
-      let input: Record<string, any> | undefined;
-      const raw = ev.data?.input;
-      if (raw && typeof raw === 'object') {
-        input = raw;
-      } else if (typeof raw === 'string') {
-        try { input = JSON.parse(raw); } catch { /* keep undefined */ }
-      }
-      const subagentType: string = input?.subagent_type ?? 'unknown';
-      const description: string = input?.description ?? '';
+      // Extract subagent_type from the tool input — the structure varies
+      // across LangGraph / deepagents versions, so try multiple paths.
+      const { subagentType, description } = extractTaskInput(ev.data);
       const runId: string = ev.run_id ?? `run-${Date.now()}`;
 
       // Build iteration label

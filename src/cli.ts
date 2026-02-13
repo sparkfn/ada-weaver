@@ -8,7 +8,7 @@ import { runPollCycle, showStatus, retractIssue, requestShutdown } from './core.
 import { runArchitect } from './architect.js';
 import { startWebhookServer, startDialogServer } from './listener.js';
 import { runReviewSingle } from './reviewer-agent.js';
-import { startDashboardServer } from './dashboard.js';
+import { startDashboardServer, startUnifiedServer } from './dashboard.js';
 
 // ── Signal handlers for graceful shutdown ────────────────────────────────────
 
@@ -48,6 +48,7 @@ const USAGE = `
 Usage: deepagents <command> [options]
 
 Commands:
+  serve             Start unified server (dashboard + webhook + dialog on one port)
   poll              Run a poll cycle: fetch, analyze, comment, branch, PR
   analyze           Analyze a single issue (Architect: understand, implement, review)
   continue          Continue review/fix cycle on an existing PR for an issue
@@ -59,6 +60,9 @@ Commands:
   kill              Force kill all running deepagents processes
   status            Show current polling state
   help              Show this help message
+
+Options for 'serve':
+  --port N          Port for the unified server (default: PORT env var or 3000)
 
 Options for 'poll':
   --dry-run           Skip all GitHub writes (comments, branches, PRs) and poll state save
@@ -86,7 +90,12 @@ Options for 'dialog':
 Options for 'dashboard':
   --port N          Port for the dashboard server (default: 3000)
 
+Environment variables:
+  PORT=3000         Default port for 'serve' command
+
 Examples:
+  deepagents serve
+  deepagents serve --port 8080
   deepagents poll
   deepagents poll --dry-run
   deepagents poll --no-save
@@ -355,6 +364,23 @@ async function main() {
           console.log(`    - ${err}`);
         }
       }
+      break;
+    }
+
+    case 'serve': {
+      const servePortStr = flags['port'];
+      if (servePortStr !== undefined) {
+        const servePort = typeof servePortStr === 'string' ? parseInt(servePortStr, 10) : NaN;
+        if (isNaN(servePort) || servePort < 1 || servePort > 65535) {
+          console.error('--port must be a number between 1 and 65535');
+          process.exit(1);
+        }
+        config.port = servePort;
+      }
+
+      console.log('\u{1F916} Deep Agents Unified Server\n');
+      activeServer = startUnifiedServer(config);
+      // Server runs until process is killed (SIGTERM/SIGINT)
       break;
     }
 

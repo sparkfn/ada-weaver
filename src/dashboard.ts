@@ -6,6 +6,8 @@ import type { Config } from './config.js';
 import { ProcessManager } from './process-manager.js';
 import { UsageService } from './usage-service.js';
 import type { UsageQuery, UsageGroupBy } from './usage-types.js';
+import { verifySignature, handleWebhookEvent } from './listener.js';
+import { chatStream } from './chat-agent.js';
 
 // ── Static directory ─────────────────────────────────────────────────────────
 
@@ -48,7 +50,11 @@ export function createDashboardApp(config: Config): { app: express.Express; proc
   const usageService = new UsageService();
   const processManager = new ProcessManager(config, usageService);
 
-  app.use(express.json());
+  // Parse JSON for all routes except /webhook (which needs the raw body for HMAC)
+  app.use((req, res, next) => {
+    if (req.path === '/webhook') return next();
+    express.json()(req, res, next);
+  });
 
   // Serve dashboard.html at root
   app.get('/', (_req: Request, res: Response) => {
@@ -229,6 +235,124 @@ export function startDashboardServer(config: Config, port: number) {
     console.log(`[dashboard] API:          http://localhost:${port}/api/status`);
     console.log(`[dashboard] Health check: http://localhost:${port}/health`);
     console.log('[dashboard] Ready.\n');
+  });
+
+  return server;
+}
+
+// ── Unified server (dashboard + webhook + dialog on one port) ───────────────
+
+export function createUnifiedApp(config: Config): { app: express.Express; processManager: ProcessManager; usageService: UsageService } {
+  const { app, processManager, usageService } = createDashboardApp(config);
+
+  // ── Webhook route ───────────────────────────────────────────────────────────
+  // Raw body parsing for HMAC verification (must be before json middleware hits this path)
+  app.post('/webhook', express.raw({ type: 'application/json' }), (req: Request, res: Response) => {
+    const rawBody = req.body as Buffer;
+
+    const secret = config.webhook?.secret;
+    if (!secret) {
+      res.status(500).json({ error: 'Webhook secret not configured' });
+      return;
+    }
+
+    const signature = req.headers['x-hub-signature-256'] as string | undefined;
+    if (!verifySignature(secret, rawBody, signature)) {
+      console.error('[webhook] Signature verification failed');
+      res.status(401).json({ error: 'Invalid signature' });
+      return;
+    }
+
+    const event = req.headers['x-github-event'] as string | undefined;
+    const deliveryId = req.headers['x-github-delivery'] as string | undefined;
+
+    if (!event) {
+      res.status(400).json({ error: 'Missing X-GitHub-Event header' });
+      return;
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(rawBody.toString('utf-8'));
+    } catch {
+      res.status(400).json({ error: 'Invalid JSON payload' });
+      return;
+    }
+
+    const webhookEvent = {
+      event,
+      deliveryId: deliveryId ?? 'unknown',
+      payload,
+    };
+
+    const action = typeof payload.action === 'string' ? payload.action : '';
+    console.log(
+      `[webhook] Received: ${event}${action ? `.${action}` : ''} ` +
+      `(delivery: ${webhookEvent.deliveryId})`,
+    );
+
+    res.status(200).json({ received: true, event, deliveryId: webhookEvent.deliveryId });
+
+    try {
+      handleWebhookEvent(webhookEvent, config);
+    } catch (err) {
+      console.error(`[webhook] Handler error for ${event}.${action}:`, err);
+    }
+  });
+
+  // ── Dialog routes ───────────────────────────────────────────────────────────
+
+  app.get('/dialog', (_req: Request, res: Response) => {
+    res.sendFile(path.join(getStaticDir(), 'dialog.html'));
+  });
+
+  app.post('/chat', express.json(), async (req: Request, res: Response) => {
+    const { message, sessionId } = req.body as { message?: string; sessionId?: string };
+
+    if (!message || typeof message !== 'string') {
+      res.status(400).json({ error: 'Missing or invalid "message" field' });
+      return;
+    }
+
+    const sid = sessionId || crypto.randomUUID();
+
+    console.log(`[chat] Session ${sid}: "${message.slice(0, 80)}${message.length > 80 ? '...' : ''}"`);
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+
+    try {
+      for await (const event of chatStream(config, message, sid)) {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+    } catch (err) {
+      console.error(`[chat] Error for session ${sid}:`, err);
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Chat agent failed' })}\n\n`);
+    }
+
+    res.write('data: [DONE]\n\n');
+    res.end();
+  });
+
+  return { app, processManager, usageService };
+}
+
+export function startUnifiedServer(config: Config) {
+  const port = config.port ?? 3000;
+  const { app } = createUnifiedApp(config);
+
+  const server = app.listen(port, () => {
+    console.log(`[serve] Listening on port ${port}`);
+    console.log(`[serve] Dashboard:    http://localhost:${port}/`);
+    console.log(`[serve] Dialog:       http://localhost:${port}/dialog`);
+    console.log(`[serve] Webhook:      http://localhost:${port}/webhook`);
+    console.log(`[serve] Chat API:     http://localhost:${port}/chat`);
+    console.log(`[serve] API:          http://localhost:${port}/api/status`);
+    console.log(`[serve] Health check: http://localhost:${port}/health`);
+    console.log('[serve] Ready.\n');
   });
 
   return server;

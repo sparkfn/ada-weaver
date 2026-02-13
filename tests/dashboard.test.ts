@@ -1,5 +1,6 @@
+import { createHmac } from 'crypto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createDashboardApp } from '../src/dashboard.js';
+import { createDashboardApp, createUnifiedApp } from '../src/dashboard.js';
 import type express from 'express';
 import type { ProcessManager } from '../src/process-manager.js';
 import type { UsageService } from '../src/usage-service.js';
@@ -12,6 +13,12 @@ vi.mock('../src/architect.js', () => ({
 
 vi.mock('../src/reviewer-agent.js', () => ({
   runReviewSingle: vi.fn().mockImplementation(() => new Promise(() => {})),
+}));
+
+vi.mock('../src/chat-agent.js', () => ({
+  chatStream: vi.fn().mockImplementation(async function* () {
+    yield { type: 'response', content: 'Hello!' };
+  }),
 }));
 
 vi.mock('../src/core.js', () => ({
@@ -407,6 +414,157 @@ describe('Dashboard API', () => {
       const res = await inject(app, 'GET', '/api/usage/group/invalid');
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('Invalid groupBy');
+    });
+  });
+});
+
+// ── Unified App Tests ─────────────────────────────────────────────────────────
+
+const WEBHOOK_SECRET = 'test-secret-123';
+
+const unifiedConfig = {
+  ...mockConfig,
+  webhook: { port: 3000, secret: WEBHOOK_SECRET },
+} as any;
+
+function signPayload(secret: string, body: Buffer): string {
+  const hmac = createHmac('sha256', secret).update(body).digest('hex');
+  return `sha256=${hmac}`;
+}
+
+/**
+ * Inject a raw-body request (for webhook HMAC testing).
+ * Simulates express.raw() by setting req.body to a Buffer.
+ */
+function injectRaw(
+  app: express.Express,
+  method: string,
+  path: string,
+  rawBody: Buffer,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: any; headers: Record<string, string> }> {
+  return new Promise((resolve) => {
+    const req: any = {
+      method: method.toUpperCase(),
+      url: path,
+      headers: { 'content-type': 'application/json', ...headers },
+      query: {},
+      params: {},
+      body: rawBody,
+      on: () => {},
+      // Prevent express.raw() from re-parsing — mark as already read
+      _body: true,
+      readable: false,
+    };
+
+    let statusCode = 200;
+    const resHeaders: Record<string, string> = {};
+    let resBody = '';
+
+    const res: any = {
+      statusCode: 200,
+      status(code: number) { statusCode = code; this.statusCode = code; return this; },
+      json(data: any) { resBody = JSON.stringify(data); this.end(); },
+      sendFile(filePath: string) { resBody = `sendFile:${filePath}`; this.end(); },
+      writeHead(code: number, hdrs: Record<string, string>) { statusCode = code; Object.assign(resHeaders, hdrs); },
+      write(chunk: string) { resBody += chunk; },
+      end() {
+        resolve({
+          status: statusCode,
+          body: resBody.startsWith('{') || resBody.startsWith('[') ? JSON.parse(resBody) : resBody,
+          headers: resHeaders,
+        });
+      },
+      setHeader(k: string, v: string) { resHeaders[k] = v; },
+      getHeader(k: string) { return resHeaders[k]; },
+    };
+
+    app.handle(req, res, () => {
+      statusCode = 404;
+      resolve({ status: 404, body: { error: 'Not Found' }, headers: resHeaders });
+    });
+  });
+}
+
+describe('Unified App', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const result = createUnifiedApp(unifiedConfig);
+    app = result.app;
+  });
+
+  describe('existing dashboard routes', () => {
+    it('GET / serves dashboard', async () => {
+      const res = await inject(app, 'GET', '/');
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('dashboard.html');
+    });
+
+    it('GET /health returns ok', async () => {
+      const res = await inject(app, 'GET', '/health');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('ok');
+    });
+
+    it('GET /api/status returns repo info', async () => {
+      const res = await inject(app, 'GET', '/api/status');
+      expect(res.status).toBe(200);
+      expect(res.body.owner).toBe('test-owner');
+    });
+  });
+
+  describe('POST /webhook', () => {
+    it('returns 200 with valid HMAC signature', async () => {
+      const payload = JSON.stringify({ action: 'opened', issue: { number: 1 } });
+      const rawBody = Buffer.from(payload);
+      const signature = signPayload(WEBHOOK_SECRET, rawBody);
+
+      const res = await injectRaw(app, 'POST', '/webhook', rawBody, {
+        'x-hub-signature-256': signature,
+        'x-github-event': 'issues',
+        'x-github-delivery': 'test-delivery-1',
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.received).toBe(true);
+    });
+
+    it('returns 401 with invalid HMAC signature', async () => {
+      const payload = JSON.stringify({ action: 'opened', issue: { number: 1 } });
+      const rawBody = Buffer.from(payload);
+
+      const res = await injectRaw(app, 'POST', '/webhook', rawBody, {
+        'x-hub-signature-256': 'sha256=invalid',
+        'x-github-event': 'issues',
+        'x-github-delivery': 'test-delivery-2',
+      });
+      expect(res.status).toBe(401);
+      expect(res.body.error).toContain('Invalid signature');
+    });
+  });
+
+  describe('GET /dialog', () => {
+    it('serves dialog.html', async () => {
+      const res = await inject(app, 'GET', '/dialog');
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('dialog.html');
+    });
+  });
+
+  describe('POST /chat', () => {
+    it('returns SSE stream', async () => {
+      const res = await inject(app, 'POST', '/chat', { message: 'Hello', sessionId: 'test-session' });
+      expect(res.status).toBe(200);
+      expect(res.headers['Content-Type']).toBe('text/event-stream');
+      expect(res.body).toContain('data:');
+      expect(res.body).toContain('[DONE]');
+    });
+
+    it('returns 400 with missing message', async () => {
+      const res = await inject(app, 'POST', '/chat', {});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('message');
     });
   });
 });

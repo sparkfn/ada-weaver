@@ -901,7 +901,10 @@
           });
           if (res.ok) {
             const proc = await res.json();
-            setProcesses(prev => [proc, ...prev]);
+            setProcesses(prev => {
+              if (prev.some(p => p.id === proc.id)) return prev;
+              return [proc, ...prev];
+            });
           }
         } catch {}
       }

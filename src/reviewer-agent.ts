@@ -11,6 +11,8 @@ import {
   wrapWithCircuitBreaker,
 } from './github-tools.js';
 import { wrapWithLogging } from './logger.js';
+import type { UsageService } from './usage-service.js';
+import type { LLMProvider } from './usage-types.js';
 
 // ── Review output interface ──────────────────────────────────────────────────
 
@@ -195,7 +197,7 @@ export function createReviewerAgent(
 export async function runReviewSingle(
   config: Config,
   prNumber: number,
-  options?: { iterationContext?: { iteration: number; previousFeedback: string[] }; signal?: AbortSignal },
+  options?: { iterationContext?: { iteration: number; previousFeedback: string[] }; signal?: AbortSignal; usageService?: UsageService; processId?: string },
 ): Promise<ReviewOutput> {
   const iteration = options?.iterationContext?.iteration ?? 1;
   console.log(`\u{1F50D} Reviewing PR #${prNumber}${iteration > 1 ? ` (iteration ${iteration})` : ''}\n`);
@@ -209,6 +211,7 @@ export async function runReviewSingle(
   console.log('='.repeat(60));
 
   let lastResponse = '';
+  let chatModelStartTime = 0;
 
   const stream = agent.streamEvents(
     { messages: [{ role: 'user', content: userMessage }] },
@@ -218,10 +221,38 @@ export async function runReviewSingle(
   for await (const ev of stream) {
     if (options?.signal?.aborted) break;
 
-    if (ev.event === 'on_chat_model_end') {
+    if (ev.event === 'on_chat_model_start') {
+      chatModelStartTime = performance.now();
+    } else if (ev.event === 'on_chat_model_end') {
       const content = ev.data?.output?.content;
       if (typeof content === 'string' && content) {
         lastResponse = content;
+      }
+
+      // Record usage metrics
+      if (options?.usageService) {
+        try {
+          let modelOutput = ev.data?.output;
+          if (typeof modelOutput === 'string') {
+            try { modelOutput = JSON.parse(modelOutput); } catch { /* keep as string */ }
+          }
+          const usage = modelOutput?.usage_metadata;
+          if (usage) {
+            const reviewerLlm = config.reviewerLlm ?? config.llm;
+            const responseModel = modelOutput?.response_metadata?.model;
+            const durationMs = chatModelStartTime > 0 ? performance.now() - chatModelStartTime : 0;
+            options.usageService.record({
+              provider: (reviewerLlm.provider ?? config.llm.provider) as LLMProvider,
+              model: responseModel ?? reviewerLlm.model ?? config.llm.model ?? 'unknown',
+              agent: 'reviewer',
+              processId: options.processId,
+              prNumber,
+              inputTokens: usage.input_tokens ?? 0,
+              outputTokens: usage.output_tokens ?? 0,
+              durationMs,
+            });
+          }
+        } catch { /* best-effort */ }
       }
     }
   }

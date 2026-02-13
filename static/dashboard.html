@@ -554,6 +554,177 @@
       );
     }
 
+    // ── Usage formatting helpers ─────────────────────────────────────────────
+
+    function formatNumber(n) {
+      if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+      if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+      return String(n);
+    }
+
+    function formatUsageDuration(ms) {
+      if (ms < 1000) return Math.round(ms) + 'ms';
+      if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+      return (ms / 60000).toFixed(1) + 'm';
+    }
+
+    function formatCost(usd) {
+      return '$' + usd.toFixed(4);
+    }
+
+    // ── SummaryCard ────────────────────────────────────────────────────────────
+
+    function SummaryCard({ label, value, sx: extraSx }) {
+      return h(Paper, { sx: { p: 2, background: '#16213e', flex: '1 1 0', minWidth: 130, ...extraSx } },
+        h(Typography, { variant: 'caption', color: 'text.secondary', sx: { display: 'block', mb: 0.5 } }, label),
+        h(Typography, { variant: 'h6', sx: { fontFamily: 'monospace', fontWeight: 600 } }, value),
+      );
+    }
+
+    // ── UsageGroupTable ────────────────────────────────────────────────────────
+
+    function UsageGroupTable({ title, groups }) {
+      if (!groups || groups.length === 0) {
+        return h(Box, { sx: { mb: 3 } },
+          h(Typography, { variant: 'subtitle2', sx: { mb: 1 } }, title),
+          h(Typography, { variant: 'body2', color: 'text.secondary' }, 'No data'),
+        );
+      }
+
+      return h(Box, { sx: { mb: 3 } },
+        h(Typography, { variant: 'subtitle2', sx: { mb: 1 } }, title),
+        h(TableContainer, { component: Paper, sx: { background: '#16213e' } },
+          h(Table, { size: 'small' },
+            h(TableHead, null,
+              h(TableRow, null,
+                h(TableCell, null, 'Name'),
+                h(TableCell, { align: 'right' }, 'Calls'),
+                h(TableCell, { align: 'right' }, 'Input'),
+                h(TableCell, { align: 'right' }, 'Output'),
+                h(TableCell, { align: 'right' }, 'Total'),
+                h(TableCell, { align: 'right' }, 'Cost'),
+                h(TableCell, { align: 'right' }, 'Avg Latency'),
+              ),
+            ),
+            h(TableBody, null,
+              groups.map(g =>
+                h(TableRow, { key: g.key },
+                  h(TableCell, null, g.key),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, g.summary.totalRecords),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, formatNumber(g.summary.totalInputTokens)),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, formatNumber(g.summary.totalOutputTokens)),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, formatNumber(g.summary.totalTokens)),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, formatCost(g.summary.totalEstimatedCost)),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, formatUsageDuration(g.summary.avgDurationMs)),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // ── RecentCallsTable ───────────────────────────────────────────────────────
+
+    function RecentCallsTable({ records }) {
+      if (!records || records.length === 0) {
+        return h(Box, { sx: { mb: 3 } },
+          h(Typography, { variant: 'subtitle2', sx: { mb: 1 } }, 'Recent Calls'),
+          h(Typography, { variant: 'body2', color: 'text.secondary' }, 'No calls recorded yet'),
+        );
+      }
+
+      return h(Box, { sx: { mb: 3 } },
+        h(Typography, { variant: 'subtitle2', sx: { mb: 1 } }, 'Recent Calls'),
+        h(TableContainer, { component: Paper, sx: { background: '#16213e', maxHeight: 400, overflowY: 'auto' } },
+          h(Table, { size: 'small', stickyHeader: true },
+            h(TableHead, null,
+              h(TableRow, null,
+                h(TableCell, { sx: { background: '#16213e' } }, 'Time'),
+                h(TableCell, { sx: { background: '#16213e' } }, 'Agent'),
+                h(TableCell, { sx: { background: '#16213e' } }, 'Model'),
+                h(TableCell, { align: 'right', sx: { background: '#16213e' } }, 'Input'),
+                h(TableCell, { align: 'right', sx: { background: '#16213e' } }, 'Output'),
+                h(TableCell, { align: 'right', sx: { background: '#16213e' } }, 'Cost'),
+                h(TableCell, { align: 'right', sx: { background: '#16213e' } }, 'Latency'),
+              ),
+            ),
+            h(TableBody, null,
+              records.map(r =>
+                h(TableRow, { key: r.id },
+                  h(TableCell, { sx: { fontFamily: 'monospace', fontSize: 12 } }, new Date(r.timestamp).toLocaleTimeString()),
+                  h(TableCell, null, h(Chip, { label: r.agent, size: 'small', variant: 'outlined' })),
+                  h(TableCell, { sx: { fontSize: 12 } }, r.model),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, formatNumber(r.inputTokens)),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, formatNumber(r.outputTokens)),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, formatCost(r.estimatedCost)),
+                  h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, formatUsageDuration(r.durationMs)),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // ── UsagePanel ─────────────────────────────────────────────────────────────
+
+    function UsagePanel({ refreshKey }) {
+      const [summary, setSummary] = useState(null);
+      const [agentGroups, setAgentGroups] = useState([]);
+      const [modelGroups, setModelGroups] = useState([]);
+      const [records, setRecords] = useState([]);
+      const [filterAgent, setFilterAgent] = useState('');
+
+      const fetchData = useCallback(() => {
+        const qs = filterAgent ? `?agent=${filterAgent}` : '';
+        const recQs = filterAgent ? `?agent=${filterAgent}&limit=20` : '?limit=20';
+        fetch(`/api/usage/summary${qs}`).then(r => r.json()).then(setSummary).catch(() => {});
+        fetch(`/api/usage/group/agent${qs}`).then(r => r.json()).then(setAgentGroups).catch(() => {});
+        fetch(`/api/usage/group/model${qs}`).then(r => r.json()).then(setModelGroups).catch(() => {});
+        fetch(`/api/usage/records${recQs}`).then(r => r.json()).then(d => setRecords(d.records || [])).catch(() => {});
+      }, [filterAgent]);
+
+      useEffect(() => { fetchData(); }, [fetchData, refreshKey]);
+
+      const agentFilters = ['', 'architect', 'issuer', 'coder', 'reviewer', 'chat'];
+      const agentLabels = { '': 'All', architect: 'Architect', issuer: 'Issuer', coder: 'Coder', reviewer: 'Reviewer', chat: 'Chat' };
+
+      return h(Box, null,
+        // Filter bar
+        h(Box, { sx: { display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' } },
+          agentFilters.map(a =>
+            h(Chip, {
+              key: a || 'all',
+              label: agentLabels[a],
+              size: 'small',
+              variant: filterAgent === a ? 'filled' : 'outlined',
+              color: filterAgent === a ? 'primary' : 'default',
+              onClick: () => setFilterAgent(a),
+              sx: { cursor: 'pointer' },
+            }),
+          ),
+        ),
+
+        // Summary cards
+        summary ? h(Box, { sx: { display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' } },
+          h(SummaryCard, { label: 'Total Calls', value: String(summary.totalRecords) }),
+          h(SummaryCard, { label: 'Input Tokens', value: formatNumber(summary.totalInputTokens) }),
+          h(SummaryCard, { label: 'Output Tokens', value: formatNumber(summary.totalOutputTokens) }),
+          h(SummaryCard, { label: 'Total Tokens', value: formatNumber(summary.totalTokens) }),
+          h(SummaryCard, { label: 'Estimated Cost', value: formatCost(summary.totalEstimatedCost) }),
+          h(SummaryCard, { label: 'Avg Latency', value: formatUsageDuration(summary.avgDurationMs) }),
+        ) : null,
+
+        // Breakdown tables
+        h(UsageGroupTable, { title: 'By Agent', groups: agentGroups }),
+        h(UsageGroupTable, { title: 'By Model', groups: modelGroups }),
+
+        // Recent calls
+        h(RecentCallsTable, { records }),
+      );
+    }
+
     // ── App ────────────────────────────────────────────────────────────────────
 
     function App() {
@@ -566,6 +737,7 @@
       const [fullPageView, setFullPageView] = useState(false);
       const [dialogOpen, setDialogOpen] = useState(false);
       const [processLogs, setProcessLogs] = useState({});
+      const [usageRefreshKey, setUsageRefreshKey] = useState(0);
 
       // Fetch initial data
       useEffect(() => {
@@ -589,6 +761,11 @@
             try { event = JSON.parse(msg.data); } catch { return; }
 
             if (event.type === 'heartbeat' || event.type === 'connected') return;
+
+            if (event.type === 'usage_recorded') {
+              setUsageRefreshKey(prev => prev + 1);
+              return;
+            }
 
             if (event.type === 'process_log' && event.logLine) {
               setProcessLogs(prev => {
@@ -737,10 +914,13 @@
                 h(Tabs, { value: tab, onChange: (_, v) => setTab(v), sx: { mb: 2 } },
                   h(Tab, { label: 'Processes' }),
                   h(Tab, { label: 'History' }),
+                  h(Tab, { label: 'Usage' }),
                 ),
                 tab === 0
                   ? h(ProcessesTable, { processes, onSelect: handleSelect, onCancel: handleCancel })
-                  : h(HistoryPanel, { history }),
+                  : tab === 1
+                    ? h(HistoryPanel, { history })
+                    : h(UsagePanel, { refreshKey: usageRefreshKey }),
               ),
         ),
 

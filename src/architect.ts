@@ -30,6 +30,8 @@ import { buildReviewerSystemPrompt } from './reviewer-agent.js';
 import { findPrForIssue } from './core.js';
 import type { Octokit } from 'octokit';
 import type { ProgressUpdate } from './process-manager.js';
+import type { UsageService } from './usage-service.js';
+import type { AgentRole, LLMProvider } from './usage-types.js';
 
 // ── Result interface ────────────────────────────────────────────────────────
 
@@ -342,6 +344,37 @@ export function createArchitect(
   return agent;
 }
 
+// ── LLM config resolver ──────────────────────────────────────────────────────
+
+/**
+ * Resolve the LLM provider and model for a given agent role based on config.
+ */
+export function resolveAgentLlmConfig(
+  config: Config,
+  agent: AgentRole,
+): { provider: LLMProvider; model: string } {
+  let llmConfig: { provider: string; model?: string | null } | undefined;
+
+  switch (agent) {
+    case 'issuer':
+      llmConfig = config.issuerLlm ?? config.llm;
+      break;
+    case 'coder':
+      llmConfig = config.coderLlm ?? config.llm;
+      break;
+    case 'reviewer':
+      llmConfig = config.reviewerLlm ?? config.llm;
+      break;
+    default:
+      llmConfig = config.llm;
+  }
+
+  return {
+    provider: (llmConfig?.provider ?? config.llm.provider) as LLMProvider,
+    model: llmConfig?.model ?? config.llm.model ?? 'unknown',
+  };
+}
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 /**
@@ -376,7 +409,7 @@ export interface ContinueContext {
 export async function runArchitect(
   config: Config,
   issueNumber: number,
-  options: { dryRun?: boolean; onProgress?: (update: ProgressUpdate) => void; signal?: AbortSignal; continueContext?: ContinueContext } = {},
+  options: { dryRun?: boolean; onProgress?: (update: ProgressUpdate) => void; signal?: AbortSignal; continueContext?: ContinueContext; usageService?: UsageService; processId?: string } = {},
 ): Promise<ArchitectResult> {
   const maxIterations = getMaxIterations(config);
 
@@ -422,6 +455,7 @@ Skip the issuer step — go directly to the reviewer:
   let activeStartTime = 0;
   let activeLabel = '';
   let lastResponse = '';
+  let chatModelStartTime = 0;
 
   const stream = architect.streamEvents(
     { messages: [{ role: 'user', content: userMessage }] },
@@ -522,10 +556,39 @@ Skip the issuer step — go directly to the reviewer:
         activeSubagent = null;
         activeLabel = '';
       }
+    } else if (ev.event === 'on_chat_model_start') {
+      chatModelStartTime = performance.now();
     } else if (ev.event === 'on_chat_model_end') {
       const content = ev.data?.output?.content;
       if (typeof content === 'string' && content) {
         lastResponse = content;
+      }
+
+      // Record usage metrics
+      if (options.usageService) {
+        try {
+          let modelOutput = ev.data?.output;
+          if (typeof modelOutput === 'string') {
+            try { modelOutput = JSON.parse(modelOutput); } catch { /* keep as string */ }
+          }
+          const usage = modelOutput?.usage_metadata;
+          if (usage) {
+            const agentRole: AgentRole = (activeSubagent as AgentRole) ?? 'architect';
+            const responseModel = modelOutput?.response_metadata?.model;
+            const llmConfig = resolveAgentLlmConfig(config, agentRole);
+            const durationMs = chatModelStartTime > 0 ? performance.now() - chatModelStartTime : 0;
+            options.usageService.record({
+              provider: llmConfig.provider,
+              model: responseModel ?? llmConfig.model,
+              agent: agentRole,
+              processId: options.processId,
+              issueNumber,
+              inputTokens: usage.input_tokens ?? 0,
+              outputTokens: usage.output_tokens ?? 0,
+              durationMs,
+            });
+          }
+        } catch { /* best-effort */ }
       }
     }
   }

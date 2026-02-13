@@ -12,6 +12,8 @@ import {
   ToolCallCounter,
 } from './github-tools.js';
 import { wrapWithLogging } from './logger.js';
+import type { UsageService } from './usage-service.js';
+import type { LLMProvider } from './usage-types.js';
 
 /**
  * Maximum tool calls per chat turn to prevent runaway loops.
@@ -133,11 +135,13 @@ export async function* chatStream(
   config: Config,
   message: string,
   sessionId: string,
+  usageService?: UsageService,
 ): AsyncGenerator<ChatEvent> {
   const agent = createChatAgent(config);
   let totalInput = 0;
   let totalOutput = 0;
   let lastResponse = '';
+  let chatModelStartTime = 0;
 
   try {
     const stream = agent.streamEvents(
@@ -147,20 +151,48 @@ export async function* chatStream(
 
     for await (const ev of stream) {
       if (ev.event === 'on_tool_start') {
-        yield { type: 'tool_start', name: ev.name, args: ev.data?.input };
+        // ev.data.input may be a parsed object OR a serialised JSON string
+        let args = ev.data?.input;
+        if (typeof args === 'string') {
+          try { args = JSON.parse(args); } catch { /* keep as string */ }
+        }
+        yield { type: 'tool_start', name: ev.name, args };
       } else if (ev.event === 'on_tool_end') {
         const out = ev.data?.output;
         const txt = typeof out === 'string' ? out : JSON.stringify(out ?? '');
         yield { type: 'tool_end', name: ev.name, result: txt.slice(0, 1000) };
+      } else if (ev.event === 'on_chat_model_start') {
+        chatModelStartTime = performance.now();
       } else if (ev.event === 'on_chat_model_end') {
-        const usage = ev.data?.output?.usage_metadata;
+        // ev.data.output may be a serialised string — parse defensively
+        let modelOutput = ev.data?.output;
+        if (typeof modelOutput === 'string') {
+          try { modelOutput = JSON.parse(modelOutput); } catch { /* keep as string */ }
+        }
+        const usage = modelOutput?.usage_metadata;
         if (usage) {
           totalInput += usage.input_tokens ?? 0;
           totalOutput += usage.output_tokens ?? 0;
         }
-        const content = ev.data?.output?.content;
+        const content = modelOutput?.content;
         if (typeof content === 'string' && content) {
           lastResponse = content;
+        }
+
+        // Record usage metrics
+        if (usageService && usage) {
+          try {
+            const responseModel = modelOutput?.response_metadata?.model;
+            const durationMs = chatModelStartTime > 0 ? performance.now() - chatModelStartTime : 0;
+            usageService.record({
+              provider: config.llm.provider as LLMProvider,
+              model: responseModel ?? config.llm.model ?? 'unknown',
+              agent: 'chat',
+              inputTokens: usage.input_tokens ?? 0,
+              outputTokens: usage.output_tokens ?? 0,
+              durationMs,
+            });
+          } catch { /* best-effort */ }
         }
       }
     }

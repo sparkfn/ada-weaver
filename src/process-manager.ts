@@ -4,6 +4,7 @@ import { runArchitect } from './architect.js';
 import type { ContinueContext } from './architect.js';
 import { runReviewSingle } from './reviewer-agent.js';
 import { loadPollState } from './core.js';
+import type { UsageService } from './usage-service.js';
 
 // ── Interfaces ───────────────────────────────────────────────────────────────
 
@@ -47,10 +48,12 @@ export class ProcessManager extends EventEmitter {
   private processes: Map<string, AgentProcess> = new Map();
   private controllers: Map<string, AbortController> = new Map();
   private config: Config;
+  private usageService?: UsageService;
 
-  constructor(config: Config) {
+  constructor(config: Config, usageService?: UsageService) {
     super();
     this.config = config;
+    this.usageService = usageService;
   }
 
   continueAnalysis(issueNumber: number, prNumber: number, branchName: string): AgentProcess {
@@ -196,6 +199,8 @@ export class ProcessManager extends EventEmitter {
         onProgress,
         signal,
         continueContext: options.continueContext,
+        usageService: this.usageService,
+        processId: proc.id,
       });
 
       if (signal.aborted) return; // already marked cancelled
@@ -222,7 +227,11 @@ export class ProcessManager extends EventEmitter {
     const restore = this.interceptConsole(proc);
 
     try {
-      const result = await runReviewSingle(this.config, proc.prNumber!, { signal });
+      const result = await runReviewSingle(this.config, proc.prNumber!, {
+        signal,
+        usageService: this.usageService,
+        processId: proc.id,
+      });
 
       if (signal.aborted) return;
 

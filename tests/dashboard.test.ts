@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createDashboardApp } from '../src/dashboard.js';
 import type express from 'express';
 import type { ProcessManager } from '../src/process-manager.js';
+import type { UsageService } from '../src/usage-service.js';
 
 // Mock dependencies so no real agents or GitHub calls happen
 vi.mock('../src/architect.js', () => ({
@@ -77,12 +78,14 @@ function inject(app: express.Express, method: string, path: string, body?: any):
 describe('Dashboard API', () => {
   let app: express.Express;
   let processManager: ProcessManager;
+  let usageService: UsageService;
 
   beforeEach(() => {
     vi.clearAllMocks();
     const result = createDashboardApp(mockConfig);
     app = result.app;
     processManager = result.processManager;
+    usageService = result.usageService;
   });
 
   describe('GET /health', () => {
@@ -238,6 +241,139 @@ describe('Dashboard API', () => {
       expect(res.body.lastPollIssueNumbers).toEqual([1, 2]);
       expect(res.body.issues).toBeDefined();
       expect(res.body.issues['1'].pr.number).toBe(5);
+    });
+  });
+
+  // ── Usage API tests ─────────────────────────────────────────────────────────
+
+  describe('GET /api/usage/summary', () => {
+    it('returns empty summary initially', async () => {
+      const res = await inject(app, 'GET', '/api/usage/summary');
+      expect(res.status).toBe(200);
+      expect(res.body.totalRecords).toBe(0);
+      expect(res.body.totalTokens).toBe(0);
+      expect(res.body.totalEstimatedCost).toBe(0);
+    });
+
+    it('returns summary after recording usage', async () => {
+      usageService.record({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        agent: 'architect',
+        inputTokens: 1000,
+        outputTokens: 500,
+        durationMs: 2000,
+      });
+      const res = await inject(app, 'GET', '/api/usage/summary');
+      expect(res.status).toBe(200);
+      expect(res.body.totalRecords).toBe(1);
+      expect(res.body.totalInputTokens).toBe(1000);
+      expect(res.body.totalOutputTokens).toBe(500);
+      expect(res.body.totalTokens).toBe(1500);
+    });
+
+    it('filters by agent', async () => {
+      usageService.record({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        agent: 'architect',
+        inputTokens: 1000,
+        outputTokens: 500,
+        durationMs: 2000,
+      });
+      usageService.record({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        agent: 'coder',
+        inputTokens: 2000,
+        outputTokens: 1000,
+        durationMs: 3000,
+      });
+      const res = await inject(app, 'GET', '/api/usage/summary?agent=coder');
+      expect(res.status).toBe(200);
+      expect(res.body.totalRecords).toBe(1);
+      expect(res.body.totalInputTokens).toBe(2000);
+    });
+  });
+
+  describe('GET /api/usage/records', () => {
+    it('returns empty records initially', async () => {
+      const res = await inject(app, 'GET', '/api/usage/records');
+      expect(res.status).toBe(200);
+      expect(res.body.records).toEqual([]);
+      expect(res.body.total).toBe(0);
+    });
+
+    it('returns records after recording usage', async () => {
+      usageService.record({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        agent: 'architect',
+        inputTokens: 1000,
+        outputTokens: 500,
+        durationMs: 2000,
+      });
+      const res = await inject(app, 'GET', '/api/usage/records');
+      expect(res.status).toBe(200);
+      expect(res.body.records).toHaveLength(1);
+      expect(res.body.total).toBe(1);
+      expect(res.body.records[0].agent).toBe('architect');
+    });
+
+    it('supports limit parameter', async () => {
+      for (let i = 0; i < 5; i++) {
+        usageService.record({
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-20250514',
+          agent: 'architect',
+          inputTokens: 1000,
+          outputTokens: 500,
+          durationMs: 2000,
+        });
+      }
+      const res = await inject(app, 'GET', '/api/usage/records?limit=2');
+      expect(res.status).toBe(200);
+      expect(res.body.records).toHaveLength(2);
+      expect(res.body.total).toBe(5);
+    });
+  });
+
+  describe('GET /api/usage/group/:groupBy', () => {
+    it('returns empty groups initially', async () => {
+      const res = await inject(app, 'GET', '/api/usage/group/agent');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it('groups by agent', async () => {
+      usageService.record({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        agent: 'architect',
+        inputTokens: 1000,
+        outputTokens: 500,
+        durationMs: 2000,
+      });
+      usageService.record({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        agent: 'coder',
+        inputTokens: 2000,
+        outputTokens: 1000,
+        durationMs: 3000,
+      });
+      const res = await inject(app, 'GET', '/api/usage/group/agent');
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(2);
+      const architectGroup = res.body.find((g: any) => g.key === 'architect');
+      expect(architectGroup).toBeDefined();
+      expect(architectGroup.summary.totalRecords).toBe(1);
+    });
+
+    it('returns 400 for invalid groupBy', async () => {
+      const res = await inject(app, 'GET', '/api/usage/group/invalid');
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Invalid groupBy');
     });
   });
 });

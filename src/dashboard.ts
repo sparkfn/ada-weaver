@@ -4,6 +4,8 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import type { Config } from './config.js';
 import { ProcessManager } from './process-manager.js';
+import { UsageService } from './usage-service.js';
+import type { UsageQuery, UsageGroupBy } from './usage-types.js';
 
 // ── Static directory ─────────────────────────────────────────────────────────
 
@@ -12,11 +14,39 @@ function getStaticDir(): string {
   return path.resolve(__dirname, '..', 'static');
 }
 
+// ── Query parser ─────────────────────────────────────────────────────────────
+
+const VALID_GROUP_BY = new Set<UsageGroupBy>(['agent', 'provider', 'model', 'processId', 'day', 'month']);
+
+function parseUsageQuery(query: Record<string, any>): UsageQuery {
+  const result: UsageQuery = {};
+  if (typeof query.agent === 'string' && query.agent) result.agent = query.agent as any;
+  if (typeof query.provider === 'string' && query.provider) result.provider = query.provider as any;
+  if (typeof query.model === 'string' && query.model) result.model = query.model;
+  if (typeof query.processId === 'string' && query.processId) result.processId = query.processId;
+  if (typeof query.since === 'string' && query.since) result.since = query.since;
+  if (typeof query.until === 'string' && query.until) result.until = query.until;
+  if (query.issueNumber !== undefined) {
+    const n = parseInt(query.issueNumber, 10);
+    if (!isNaN(n)) result.issueNumber = n;
+  }
+  if (query.limit !== undefined) {
+    const n = parseInt(query.limit, 10);
+    if (!isNaN(n) && n > 0) result.limit = n;
+  }
+  if (query.offset !== undefined) {
+    const n = parseInt(query.offset, 10);
+    if (!isNaN(n) && n >= 0) result.offset = n;
+  }
+  return result;
+}
+
 // ── Express app factory ──────────────────────────────────────────────────────
 
-export function createDashboardApp(config: Config): { app: express.Express; processManager: ProcessManager } {
+export function createDashboardApp(config: Config): { app: express.Express; processManager: ProcessManager; usageService: UsageService } {
   const app = express();
-  const processManager = new ProcessManager(config);
+  const usageService = new UsageService();
+  const processManager = new ProcessManager(config, usageService);
 
   app.use(express.json());
 
@@ -124,7 +154,35 @@ export function createDashboardApp(config: Config): { app: express.Express; proc
     res.json(state);
   });
 
-  // SSE event stream
+  // ── Usage API endpoints ─────────────────────────────────────────────────────
+
+  // Usage summary
+  app.get('/api/usage/summary', (req: Request, res: Response) => {
+    const filter = parseUsageQuery(req.query);
+    res.json(usageService.summarize(filter));
+  });
+
+  // Usage records (paginated)
+  app.get('/api/usage/records', (req: Request, res: Response) => {
+    const filter = parseUsageQuery(req.query);
+    const records = usageService.query(filter);
+    const total = usageService.count(filter);
+    res.json({ records, total });
+  });
+
+  // Usage group by
+  app.get('/api/usage/group/:groupBy', (req: Request, res: Response) => {
+    const groupBy = req.params.groupBy as UsageGroupBy;
+    if (!VALID_GROUP_BY.has(groupBy)) {
+      res.status(400).json({ error: `Invalid groupBy: ${groupBy}. Must be one of: ${[...VALID_GROUP_BY].join(', ')}` });
+      return;
+    }
+    const filter = parseUsageQuery(req.query);
+    res.json(usageService.groupBy(groupBy, filter));
+  });
+
+  // ── SSE event stream ────────────────────────────────────────────────────────
+
   app.get('/api/events', (req: Request, res: Response) => {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -134,11 +192,16 @@ export function createDashboardApp(config: Config): { app: express.Express; proc
 
     res.write('data: {"type":"connected"}\n\n');
 
-    const onEvent = (event: any) => {
+    const onProcessEvent = (event: any) => {
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     };
 
-    processManager.on('process_event', onEvent);
+    const onUsageRecorded = (record: any) => {
+      res.write(`data: ${JSON.stringify({ type: 'usage_recorded', record })}\n\n`);
+    };
+
+    processManager.on('process_event', onProcessEvent);
+    usageService.on('usage_recorded', onUsageRecorded);
 
     // Heartbeat every 30s to keep connection alive
     const heartbeat = setInterval(() => {
@@ -146,12 +209,13 @@ export function createDashboardApp(config: Config): { app: express.Express; proc
     }, 30000);
 
     req.on('close', () => {
-      processManager.off('process_event', onEvent);
+      processManager.off('process_event', onProcessEvent);
+      usageService.off('usage_recorded', onUsageRecorded);
       clearInterval(heartbeat);
     });
   });
 
-  return { app, processManager };
+  return { app, processManager, usageService };
 }
 
 // ── Server start ─────────────────────────────────────────────────────────────

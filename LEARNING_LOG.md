@@ -5968,3 +5968,99 @@ REVIEWER_LLM_MODEL=gpt-4
 - **Entry 45** (Architect Supervisor): The Architect supervisor wires role-specific models to subagents via constructor injection.
 - **Entry 50** (Usage Metrics): Per-agent usage tracking makes the cost impact of model choices visible.
 - **Entry 25** (Triage Agent): The `triageLlm` concept (now `issuerLlm` with backward compat `TRIAGE_LLM_*`) was the first per-agent model override.
+
+## Entry 54: Shared File Cache — Reducing Redundant GitHub API Calls (v1.8.0)
+
+**Date:** 2026-02-15
+**Author:** Architect Agent
+
+### The problem
+
+When the Architect processes an issue, it spawns subagents sequentially: issuer → coder → reviewer (with potential review iterations). Each subagent independently reads many of the same files via the GitHub API. For example, the issuer reads `src/app.ts` to understand the codebase, then the coder reads the same file to implement a fix, and the reviewer reads it again to verify changes. Every read was a fresh API call, wasting tokens and adding latency.
+
+### The solution: ToolCache
+
+A single `ToolCache` instance is created once per `runArchitect()` call and shared across all subagents. It's an in-memory `Map<string, string>` that caches tool results by a structured key.
+
+```typescript
+// src/tool-cache.ts
+export class ToolCache {
+  private cache = new Map<string, string>();
+  private stats = { hits: 0, misses: 0, invalidations: 0 };
+
+  get(key: string): string | undefined { ... }
+  set(key: string, value: string): void { ... }
+  invalidate(key: string): boolean { ... }
+  invalidateByPrefix(prefix: string): number { ... }
+  invalidateBySuffix(suffix: string): number { ... }
+}
+```
+
+Three read tools are cached with structured keys:
+
+| Tool | Cache Key Pattern |
+|------|------------------|
+| `read_repo_file` | `file:${path}:${branch}` |
+| `list_repo_files` | `tree:${dirPath}:${branch}` |
+| `get_pr_diff` | `diff:${pull_number}` |
+
+Write operations (`create_or_update_file`) trigger cache invalidation: the specific file key, all tree listings for that branch, and all diffs.
+
+### Key design decision: Wrap `func`, not `invoke`
+
+This was the critical lesson. LangChain tools have two layers:
+
+- **`.invoke()`** — The Runnable lifecycle method that handles ToolCall objects, zod parsing, and callback propagation (handleChainStart/handleChainEnd)
+- **`.func`** — The inner handler that actually calls the GitHub API
+
+The initial implementation wrapped `.invoke()` and returned cached values directly on hits. This broke LangGraph's message graph because short-circuiting `invoke` bypassed the callback lifecycle, causing `MiddlewareError: 400 Invalid parameter: messages with role 'tool' must be a response to a preceding message with 'tool_calls'`.
+
+The fix: wrap `.func` instead. This way `invoke()` always runs fully (ToolCall handling, callbacks, id propagation), and only the API handler inside `func` is cached/skipped. LangGraph sees a normal tool execution regardless of cache hits.
+
+```typescript
+export function wrapWithCache<T extends ReturnType<typeof tool>>(
+  wrappedTool: T,
+  cache: ToolCache,
+  opts: { extractKey: (input: any) => string },
+): T {
+  const toolAny = wrappedTool as any;
+  const originalFunc = toolAny.func;
+  toolAny.func = async (input: any, ...rest: any[]) => {
+    const key = opts.extractKey(input);
+    const cached = cache.get(key);
+    if (cached !== undefined) {
+      console.log(`[CACHE HIT] ${wrappedTool.name} | ${key}`);
+      return cached;
+    }
+    const result = await originalFunc(input, ...rest);
+    cache.set(key, result);
+    return result;
+  };
+  return wrappedTool;
+}
+```
+
+### Wrapping order matters
+
+The cache wraps `func` (inner), while circuit breaker and logging wrap `invoke` (outer):
+
+```
+raw tool → wrapWithCache (on func) → wrapWithCircuitBreaker (on invoke) → wrapWithLogging (on invoke)
+```
+
+A cache hit still flows through circuit breaker counting and logging, but the actual GitHub API handler is never called.
+
+### Why existing wrappers didn't have this problem
+
+`wrapWithCircuitBreaker` and `wrapWithLogging` also wrap `.invoke()`, but they **always call through** to `originalInvoke` — they never short-circuit it. The cache is unique in that it **bypasses** `invoke` on hits, which is why wrapping `func` is the correct approach.
+
+### Dry-run results
+
+First successful dry run showed: **7 cache hits, 50 misses (12.3% hit rate)** on issue #27. The hit rate would increase significantly with review iterations (reviewer reuses coder's cached files) and with more complex issues that touch many shared files.
+
+### Connections to previous entries
+
+- **Entry 20** (Circuit Breaker): The `wrapWithCircuitBreaker` pattern inspired the `wrapWithCache` wrapper approach. Understanding that circuit breaker wraps `invoke` without short-circuiting was key to diagnosing the MiddlewareError.
+- **Entry 29** (Structured Logging): The `wrapWithLogging` middleware follows the same `invoke`-wrapping pattern. Cache must be applied at a different layer (`func`) to avoid lifecycle conflicts.
+- **Entry 49** (Parallel Subagents): Cache is shared across parallel coder/reviewer runs, maximizing reuse.
+- **Entry 50** (Usage Metrics): Cache stats (hits, misses, invalidations) are logged alongside usage metrics for observability.

@@ -261,7 +261,7 @@ Your job is to thoroughly understand a GitHub issue, produce a brief for the tea
 WORKFLOW:
 1. Read the issue title, body, and labels
 2. Check for sub-issues (fetch_sub_issues) and parent issue (get_parent_issue)
-3. Use list_repo_files to see the repository structure
+3. Use list_repo_files to see the top-level repo structure (it defaults to depth 2). Then drill into the relevant directory with a path filter (e.g., path: "src/") — do NOT list the entire repo tree.
 4. Use read_repo_file to read 2-5 files relevant to the issue
 5. Post your analysis as a comment on the issue using comment_on_issue (see format below)
 6. Return your brief as your final message (the Architect will read it)
@@ -374,7 +374,7 @@ PHASE 1: PLANNING (mandatory, do this FIRST)
 ═══════════════════════════════════════
 
 Before making ANY changes, you must:
-1. Use list_repo_files to understand the project structure
+1. Use list_repo_files to see the top-level structure, then use path to drill into the relevant directory (e.g., path: "src/") — don't list the entire tree
 2. Use read_repo_file to read ALL files relevant to the task (files mentioned by the Architect + related files)
 3. Identify existing patterns, conventions, imports, and dependencies
 4. Produce an EXECUTION PLAN as a numbered list:
@@ -406,7 +406,7 @@ WORKFLOW FOR NEW ISSUES:
    - Write the FULL file content (not a diff) — the tool replaces the entire file
    - Each call commits one file. Make multiple calls for multi-file changes.
 4. Self-review: use read_repo_file to read back each committed file and verify correctness against your plan
-5. Open a draft PR with title "Fix #<number>: <description>" using create_pull_request
+5. Open a PR with title "Fix #<number>: <description>" using create_pull_request
    - If a base branch was specified, set the base parameter to match (e.g. base: "develop")
    - Body must contain "Closes #<number>" on its own line
    - Include your execution plan and a "## Self-Review" section noting what you checked
@@ -420,7 +420,7 @@ WORKFLOW FOR FIX ITERATIONS (when told to fix reviewer feedback):
 
 CONSTRAINTS:
 - Always create the branch BEFORE committing files, and commit files BEFORE the PR
-- Never merge PRs — always open them as drafts
+- Never merge PRs — only open them
 - Write tools are idempotent. If they return { skipped: true }, move to the next step
 - Base your changes on actual file content from read_repo_file, not assumptions
 - If adding new dependencies, explain why in the PR body
@@ -444,7 +444,7 @@ TESTING GUIDELINES (only when instructed by the Architect):
 
   return {
     name: 'coder',
-    description: 'Implements code changes — creates branches, commits files, opens draft PRs. Can also fix reviewer feedback on existing branches.',
+    description: 'Implements code changes — creates branches, commits files, opens PRs. Can also fix reviewer feedback on existing branches.',
     systemPrompt,
     tools,
     ...(opts.model ? { model: opts.model } : {}),
@@ -503,7 +503,7 @@ You coordinate a team of specialist agents to process GitHub issues end-to-end. 
 
 YOUR TEAM:
 - **issuer**: Understands issues. Give it an issue number and it produces a brief (summary, type, complexity, relevant files, recommended approach, whether to proceed).
-- **coder**: Implements changes via the GitHub API. Give it specific instructions based on the Issuer's brief. It creates branches, commits code via create_or_update_file, and opens draft PRs. It does NOT have local filesystem access — all operations go through GitHub API tools.
+- **coder**: Implements changes via the GitHub API. Give it specific instructions based on the Issuer's brief. It creates branches, commits code via create_or_update_file, and opens PRs. It does NOT have local filesystem access — all operations go through GitHub API tools.
 - **reviewer**: Reviews PRs. Give it a PR number and it reviews the diff, posts feedback, and returns a verdict (resolved or needs_changes with specific feedback items).
 
 STANDARD WORKFLOW:

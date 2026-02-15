@@ -214,7 +214,7 @@ export function createPullRequestTool(owner: string, repo: string, octokit: Octo
   return tool(
     async ({ title, body, head, base = 'main' }: { title: string; body: string; head: string; base?: string }) => {
       try {
-        console.log(`\u{1F4DD} Creating draft PR '${title}' in ${owner}/${repo}...`);
+        console.log(`\u{1F4DD} Creating PR '${title}' in ${owner}/${repo}...`);
         const { data: existingPRs } = await withRetry(() => octokit.rest.pulls.list({
           owner, repo, head: `${owner}:${head}`, base, state: 'open',
         }));
@@ -224,16 +224,16 @@ export function createPullRequestTool(owner: string, repo: string, octokit: Octo
           return JSON.stringify({ skipped: true, reason: `Open PR #${existing.number} already exists for branch '${head}'.`, number: existing.number, html_url: existing.html_url });
         }
         const { data: pr } = await withRetry(() => octokit.rest.pulls.create({
-          owner, repo, title, body, head, base, draft: true,
+          owner, repo, title, body, head, base,
         }));
-        return JSON.stringify({ number: pr.number, html_url: pr.html_url, state: pr.state, draft: pr.draft });
+        return JSON.stringify({ number: pr.number, html_url: pr.html_url, state: pr.state });
       } catch (error) {
         return `Error creating pull request: ${error}`;
       }
     },
     {
       name: 'create_pull_request',
-      description: 'Open a draft pull request. The PR should reference the issue number in the title and body. Always creates a draft PR -- never auto-merges. Automatically skips if an open PR already exists for the same branch (idempotent).',
+      description: 'Open a pull request. The PR should reference the issue number in the title and body. Automatically skips if an open PR already exists for the same branch (idempotent).',
       schema: z.object({
         title: z.string().describe('PR title (e.g., "Fix #42: Resolve login timeout")'),
         body: z.string().describe('PR description with analysis and approach. Include "Closes #N" to link the issue.'),
@@ -246,7 +246,7 @@ export function createPullRequestTool(owner: string, repo: string, octokit: Octo
 
 export function createListRepoFilesTool(owner: string, repo: string, octokit: Octokit) {
   return tool(
-    async ({ path = '', branch = 'main' }: { path?: string; branch?: string }) => {
+    async ({ path = '', branch = 'main', depth }: { path?: string; branch?: string; depth?: number }) => {
       try {
         console.log(`\u{1F4C2} Listing files in ${owner}/${repo}${path ? ` under ${path}` : ''}...`);
         const { data: ref } = await withRetry(() => octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` }));
@@ -255,24 +255,82 @@ export function createListRepoFilesTool(owner: string, repo: string, octokit: Oc
         const treeSha = commit.tree.sha;
         const { data: tree } = await withRetry(() => octokit.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: 'true' }));
         const prefix = path ? (path.endsWith('/') ? path : path + '/') : '';
-        const files = tree.tree
+        const prefixSegments = prefix ? prefix.split('/').filter(Boolean).length : 0;
+
+        // Default depth: 2 when no path given (avoids overwhelming output on large repos).
+        // When a path is specified, default to unlimited (the user asked for that subtree).
+        const effectiveDepth = depth ?? (prefix ? undefined : 2);
+
+        const allFiles = tree.tree
           .filter((item) => item.type === 'blob')
-          .filter((item) => !prefix || item.path?.startsWith(prefix))
-          .map((item) => ({ path: item.path, size: item.size }));
-        if (tree.truncated) {
-          return JSON.stringify({ files, warning: 'Tree was truncated by GitHub API (repo has too many files). Results may be incomplete.', total: files.length }, null, 2);
+          .filter((item) => !prefix || item.path?.startsWith(prefix));
+
+        if (effectiveDepth == null) {
+          // Unlimited depth — return all matching files (original behavior)
+          const files = allFiles.map((item) => ({ path: item.path, size: item.size }));
+          const result: Record<string, unknown> = { files, total: files.length };
+          if (tree.truncated) {
+            result.warning = 'Tree was truncated by GitHub API (repo has too many files). Results may be incomplete.';
+          }
+          return JSON.stringify(result, null, 2);
         }
-        return JSON.stringify({ files, total: files.length }, null, 2);
+
+        // Depth-limited: separate files within depth from those beyond
+        const maxSegments = prefixSegments + effectiveDepth;
+        const withinDepth: typeof allFiles = [];
+        const beyondDepthDirs = new Map<string, { count: number; totalSize: number }>();
+
+        for (const item of allFiles) {
+          const segments = item.path!.split('/').filter(Boolean).length;
+          if (segments <= maxSegments) {
+            withinDepth.push(item);
+          } else {
+            // Group by the directory at the depth boundary
+            const parts = item.path!.split('/');
+            const dirPath = parts.slice(0, maxSegments).join('/') + '/';
+            const existing = beyondDepthDirs.get(dirPath) || { count: 0, totalSize: 0 };
+            existing.count++;
+            existing.totalSize += item.size || 0;
+            beyondDepthDirs.set(dirPath, existing);
+          }
+        }
+
+        const files = withinDepth.map((item) => ({ path: item.path, size: item.size }));
+        const directories = Array.from(beyondDepthDirs.entries())
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([dir, info]) => ({
+            path: dir,
+            files_below: info.count,
+            total_size: info.totalSize,
+          }));
+
+        const result: Record<string, unknown> = {
+          files,
+          total_files: allFiles.length,
+          shown_files: files.length,
+        };
+
+        if (directories.length > 0) {
+          result.directories = directories;
+          const hiddenFiles = allFiles.length - withinDepth.length;
+          result.note = `Showing depth ${effectiveDepth}${prefix ? ` under "${path}"` : ''}. ${directories.length} directories contain ${hiddenFiles} more files. Use path to explore deeper (e.g., path: "${directories[0].path}").`;
+        }
+
+        if (tree.truncated) {
+          result.warning = 'Tree was truncated by GitHub API (repo has too many files). Results may be incomplete.';
+        }
+        return JSON.stringify(result, null, 2);
       } catch (error) {
         return `Error listing files: ${error}`;
       }
     },
     {
       name: 'list_repo_files',
-      description: 'List all files in the repository. Returns file paths and sizes. Use this to understand the repo structure before reading specific files. Supports optional path prefix filtering (e.g., "src/" to list only source files).',
+      description: 'List files in the repository. Returns file paths, sizes, and directory summaries. Start with no arguments to see the top-level structure (depth 2), then use path to drill into specific directories. For a bug fix, focus on the relevant subdirectory rather than listing everything.',
       schema: z.object({
-        path: z.string().optional().default('').describe('Filter files by path prefix (e.g., "src/", "test/"). Empty string returns all files.'),
+        path: z.string().optional().default('').describe('Filter by path prefix (e.g., "src/", "tests/"). Empty = root. When path is set, all files under it are returned.'),
         branch: z.string().optional().default('main').describe('Branch to list files from (default: main)'),
+        depth: z.number().optional().describe('Max directory depth to show. Defaults to 2 at root (showing top-level structure). Omit when using path filter (returns full subtree). Set explicitly to limit large subtrees.'),
       }),
     }
   );
@@ -577,10 +635,10 @@ export function createDryRunBranchTool() {
 export function createDryRunPullRequestTool() {
   return tool(
     async ({ title, body, head, base = 'main' }: { title: string; body: string; head: string; base?: string }) => {
-      console.log(`DRY RUN -- would create draft PR '${title}' (${head} -> ${base})`);
-      return JSON.stringify({ dry_run: true, number: 0, html_url: `(dry-run) PR: ${title}`, state: 'open', draft: true });
+      console.log(`DRY RUN -- would create PR '${title}' (${head} -> ${base})`);
+      return JSON.stringify({ dry_run: true, number: 0, html_url: `(dry-run) PR: ${title}`, state: 'open' });
     },
-    { name: 'create_pull_request', description: 'Open a draft pull request. (DRY RUN MODE: will log but not execute)', schema: z.object({ title: z.string().describe('PR title'), body: z.string().describe('PR description'), head: z.string().describe('The branch containing changes'), base: z.string().optional().default('main').describe('The branch to merge into (default: main)') }) }
+    { name: 'create_pull_request', description: 'Open a pull request. (DRY RUN MODE: will log but not execute)', schema: z.object({ title: z.string().describe('PR title'), body: z.string().describe('PR description'), head: z.string().describe('The branch containing changes'), base: z.string().optional().default('main').describe('The branch to merge into (default: main)') }) }
   );
 }
 

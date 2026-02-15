@@ -201,7 +201,7 @@ describe('createPullRequestTool (idempotency)', () => {
   it('creates PR when no existing open PR found', async () => {
     octokit.rest.pulls.list.mockResolvedValue({ data: [] });
     octokit.rest.pulls.create.mockResolvedValue({
-      data: { number: 11, html_url: 'https://github.com/owner/repo/pull/11', state: 'open', draft: true },
+      data: { number: 11, html_url: 'https://github.com/owner/repo/pull/11', state: 'open' },
     });
 
     const toolFn = createPullRequestTool('owner', 'repo', octokit);
@@ -212,17 +212,16 @@ describe('createPullRequestTool (idempotency)', () => {
     }));
 
     expect(result.number).toBe(11);
-    expect(result.draft).toBe(true);
     expect(octokit.rest.pulls.create).toHaveBeenCalledTimes(1);
-    // Verify draft: true is passed
+    // Verify draft is not set (open PR by default)
     const callArgs = octokit.rest.pulls.create.mock.calls[0][0];
-    expect(callArgs.draft).toBe(true);
+    expect(callArgs.draft).toBeUndefined();
   });
 
   it('uses owner:head format for the head parameter in list', async () => {
     octokit.rest.pulls.list.mockResolvedValue({ data: [] });
     octokit.rest.pulls.create.mockResolvedValue({
-      data: { number: 12, html_url: 'url', state: 'open', draft: true },
+      data: { number: 12, html_url: 'url', state: 'open' },
     });
 
     const toolFn = createPullRequestTool('myorg', 'repo', octokit);
@@ -317,6 +316,141 @@ describe('createGitHubIssuesTool', () => {
 
     const callArgs = octokit.rest.issues.listForRepo.mock.calls[0][0];
     expect(callArgs.per_page).toBe(20);
+  });
+});
+
+// ── List repo files (depth limiting) ─────────────────────────────────────────
+
+describe('createListRepoFilesTool', () => {
+  let octokit: ReturnType<typeof createMockOctokit>;
+
+  // Helper: build a mock tree response
+  function mockTree(files: string[], truncated = false) {
+    octokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'ref-sha' } } });
+    octokit.rest.git.getCommit.mockResolvedValue({ data: { tree: { sha: 'tree-sha' } } });
+    octokit.rest.git.getTree.mockResolvedValue({
+      data: {
+        sha: 'tree-sha',
+        truncated,
+        tree: files.map((f) => ({ path: f, type: 'blob', size: 100 })),
+      },
+    });
+  }
+
+  beforeEach(() => {
+    octokit = createMockOctokit();
+  });
+
+  it('defaults to depth 2 when no path is given', async () => {
+    mockTree([
+      'README.md',
+      'package.json',
+      'src/index.ts',
+      'src/utils.ts',
+      'src/lib/helper.ts',
+      'src/lib/deep/nested.ts',
+      'tests/test.ts',
+    ]);
+
+    const toolFn = createListRepoFilesTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({}));
+
+    // Depth 2: README.md (1 segment), src/index.ts (2 segments), src/utils.ts (2), tests/test.ts (2) are within depth
+    // src/lib/helper.ts (3 segments) and src/lib/deep/nested.ts (4 segments) are beyond depth
+    expect(result.shown_files).toBe(5);
+    expect(result.total_files).toBe(7);
+    expect(result.directories).toBeDefined();
+    expect(result.directories).toHaveLength(1); // src/lib/
+    expect(result.directories[0].path).toBe('src/lib/');
+    expect(result.directories[0].files_below).toBe(2);
+    expect(result.note).toContain('depth 2');
+    expect(result.note).toContain('src/lib/');
+  });
+
+  it('returns all files under a path when path is specified (no depth limit)', async () => {
+    mockTree([
+      'README.md',
+      'src/index.ts',
+      'src/lib/helper.ts',
+      'src/lib/deep/nested.ts',
+    ]);
+
+    const toolFn = createListRepoFilesTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ path: 'src/' }));
+
+    // Path filter: only src/ files, no depth limit
+    expect(result.files).toHaveLength(3);
+    expect(result.total).toBe(3);
+    expect(result.directories).toBeUndefined();
+  });
+
+  it('respects explicit depth parameter', async () => {
+    mockTree([
+      'README.md',
+      'src/index.ts',
+      'src/lib/helper.ts',
+      'src/lib/deep/nested.ts',
+    ]);
+
+    const toolFn = createListRepoFilesTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ depth: 1 }));
+
+    // Depth 1: only README.md (1 segment)
+    expect(result.shown_files).toBe(1);
+    expect(result.files[0].path).toBe('README.md');
+    expect(result.directories).toHaveLength(1); // src/
+    expect(result.directories[0].path).toBe('src/');
+    expect(result.directories[0].files_below).toBe(3);
+  });
+
+  it('combines path and depth', async () => {
+    mockTree([
+      'src/index.ts',
+      'src/lib/helper.ts',
+      'src/lib/deep/nested.ts',
+      'src/lib/deep/other.ts',
+    ]);
+
+    const toolFn = createListRepoFilesTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ path: 'src/', depth: 1 }));
+
+    // Under src/ with depth 1: only src/index.ts (1 segment relative to prefix)
+    // src/lib/helper.ts (2 relative), src/lib/deep/* (3 relative) go to directories
+    expect(result.shown_files).toBe(1);
+    expect(result.files[0].path).toBe('src/index.ts');
+    expect(result.directories).toHaveLength(1); // src/lib/
+    expect(result.directories[0].path).toBe('src/lib/');
+    expect(result.directories[0].files_below).toBe(3);
+  });
+
+  it('returns all files when everything is within depth', async () => {
+    mockTree(['README.md', 'src/index.ts']);
+
+    const toolFn = createListRepoFilesTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({}));
+
+    expect(result.shown_files).toBe(2);
+    expect(result.total_files).toBe(2);
+    // No directories when nothing is beyond depth
+    expect(result.directories).toBeUndefined();
+  });
+
+  it('includes truncation warning when GitHub API truncates tree', async () => {
+    mockTree(['README.md'], true);
+
+    const toolFn = createListRepoFilesTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({}));
+
+    expect(result.warning).toContain('truncated');
+  });
+
+  it('returns error string on API failure', async () => {
+    octokit.rest.git.getRef.mockRejectedValue(new Error('Not found'));
+
+    const toolFn = createListRepoFilesTool('owner', 'repo', octokit);
+    const result = await toolFn.invoke({});
+
+    expect(result).toContain('Error listing files');
   });
 });
 
@@ -429,7 +563,7 @@ describe('createDryRunPullRequestTool', () => {
 
     expect(result.dry_run).toBe(true);
     expect(result.number).toBe(0);
-    expect(result.draft).toBe(true);
+    expect(result.draft).toBeUndefined();
   });
 
   it('has the same tool name as the real tool', () => {

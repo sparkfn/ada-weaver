@@ -164,9 +164,10 @@ export function readFileKey(input: any): string {
   return `file:${input.path}:${input.branch ?? 'main'}`;
 }
 
-/** Cache key for list_repo_files: `tree:${path}:${branch}` */
+/** Cache key for list_repo_files: `tree:${path}:${branch}:d${depth}` */
 export function listFilesKey(input: any): string {
-  return `tree:${input.path ?? ''}:${input.branch ?? 'main'}`;
+  const depth = input.depth != null ? input.depth : (input.path ? 'all' : '2');
+  return `tree:${input.path ?? ''}:${input.branch ?? 'main'}:d${depth}`;
 }
 
 /** Cache key for get_pr_diff: `diff:${pull_number}` */

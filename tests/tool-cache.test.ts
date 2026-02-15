@@ -132,12 +132,16 @@ describe('key extractors', () => {
     expect(readFileKey({ path: 'README.md' })).toBe('file:README.md:main');
   });
 
-  it('listFilesKey uses path and branch', () => {
-    expect(listFilesKey({ path: 'src/', branch: 'feature' })).toBe('tree:src/:feature');
+  it('listFilesKey uses path and branch with depth', () => {
+    expect(listFilesKey({ path: 'src/', branch: 'feature' })).toBe('tree:src/:feature:dall');
   });
 
-  it('listFilesKey defaults path and branch', () => {
-    expect(listFilesKey({})).toBe('tree::main');
+  it('listFilesKey defaults path and branch with default depth', () => {
+    expect(listFilesKey({})).toBe('tree::main:d2');
+  });
+
+  it('listFilesKey includes explicit depth', () => {
+    expect(listFilesKey({ path: '', depth: 5 })).toBe('tree::main:d5');
   });
 
   it('prDiffKey uses pull_number', () => {

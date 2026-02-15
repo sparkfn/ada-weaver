@@ -94,9 +94,9 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 | [#12](../../issues/12) | HTTP webhook listener | ✓ v0.3.5 |
 | [#13](../../issues/13) | Handle `issues.opened` event | ✓ v0.6.0 |
 | [#14](../../issues/14) | Handle `pull_request.opened` event | ✓ v0.6.0 |
-| [#18](../../issues/18) | Persistent job queue (PostgreSQL) | Deferred |
+| [#18](../../issues/18) | Persistent storage (PostgreSQL) | ✓ v1.7.0 |
 
-**Milestone:** Issues are processed in real-time via webhooks. PR events are dispatched with loop prevention. Cron mode still works as a fallback. Job queue (#18) deferred — fire-and-forget is sufficient for a learning project.
+**Milestone:** Issues are processed in real-time via webhooks. PR events are dispatched with loop prevention. Cron mode still works as a fallback. PostgreSQL persistence added in v1.7.0 — poll state, usage metrics, and process history survive restarts.
 
 ---
 
@@ -114,14 +114,15 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 
 **Architecture:**
 ```
-                    ┌─────────────────────────────────┐
-                    │         Docker Compose           │
-                    │                                  │
-GitHub ──webhook──► │  [Caddy :443] ──► [Node :3000]  │
-                    │                       │          │
-                    │                  [PostgreSQL]    │
-                    │                   (job queue)    │
-                    └─────────────────────────────────┘
+                    ┌──────────────────────────────────────┐
+                    │           Docker Compose              │
+                    │                                       │
+GitHub ──webhook──► │  [Caddy :443] ──► [Node :3000]       │
+                    │                       │               │
+                    │                  [PostgreSQL :5432]    │
+                    │                   (poll state, usage,  │
+                    │                    processes, repos)   │
+                    └──────────────────────────────────────┘
 ```
 
 ---
@@ -171,6 +172,8 @@ Incremental improvements after the v1.0.0 milestone. These are not new phases �
 | v1.3.0 | Architect supervisor — multi-agent team with LLM-driven orchestration | ✓ v1.3.0 |
 | v1.4.0 | Web dashboard, continue command, coder planning phase, colored diff logging, UNKNOWN agent fix | ✓ v1.4.0 |
 | v1.5.0 | Parallel subagent support — Architect can spawn concurrent coders/reviewers for independent tasks | ✓ v1.5.0 |
+| v1.6.0 | LLM usage metrics, `/prompt` human-in-the-loop feedback, unified `serve` command, `test-access` CLI | ✓ v1.6.0 |
+| v1.7.0 | PostgreSQL persistence & multi-repo schema — poll state, usage, processes survive restarts | ✓ v1.7.0 |
 
 ---
 

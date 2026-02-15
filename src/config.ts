@@ -77,6 +77,19 @@ export function loadConfig() {
   // reviewerLlm (all-or-nothing: only if PROVIDER is set)
   config.reviewerLlm = readLlmFromEnv('REVIEWER_LLM');
 
+  // database
+  const databaseUrl = process.env.DATABASE_URL;
+  if (databaseUrl || process.env.PG_HOST) {
+    config.database = {
+      databaseUrl: databaseUrl || undefined,
+      host: process.env.PG_HOST || undefined,
+      port: parseIntEnv('PG_PORT') || undefined,
+      database: process.env.PG_DATABASE || undefined,
+      user: process.env.PG_USER || undefined,
+      password: process.env.PG_PASSWORD || undefined,
+    };
+  }
+
   // webhook
   const webhookPort = parseIntEnv('WEBHOOK_PORT');
   const webhookSecret = process.env.WEBHOOK_SECRET;

@@ -5,6 +5,7 @@ import type { ContinueContext } from './architect.js';
 import { runReviewSingle } from './reviewer-agent.js';
 import { loadPollState } from './core.js';
 import type { UsageService } from './usage-service.js';
+import type { ProcessRepository } from './process-repository.js';
 
 // ── Interfaces ───────────────────────────────────────────────────────────────
 
@@ -52,11 +53,29 @@ export class ProcessManager extends EventEmitter {
   private controllers: Map<string, AbortController> = new Map();
   private config: Config;
   private usageService?: UsageService;
+  private processRepo?: ProcessRepository;
 
-  constructor(config: Config, usageService?: UsageService) {
+  constructor(config: Config, usageService?: UsageService, processRepo?: ProcessRepository) {
     super();
     this.config = config;
     this.usageService = usageService;
+    this.processRepo = processRepo;
+  }
+
+  private persistSave(proc: AgentProcess): void {
+    if (this.processRepo) {
+      Promise.resolve(this.processRepo.save(proc)).catch(err =>
+        console.error(`[process-manager] Failed to persist process ${proc.id}:`, err),
+      );
+    }
+  }
+
+  private persistUpdate(proc: AgentProcess): void {
+    if (this.processRepo) {
+      Promise.resolve(this.processRepo.update(proc)).catch(err =>
+        console.error(`[process-manager] Failed to persist process update ${proc.id}:`, err),
+      );
+    }
   }
 
   continueAnalysis(issueNumber: number, prNumber: number, branchName: string, humanFeedback?: string): AgentProcess {
@@ -74,6 +93,7 @@ export class ProcessManager extends EventEmitter {
     };
 
     this.processes.set(id, proc);
+    this.persistSave(proc);
     const controller = new AbortController();
     this.controllers.set(id, controller);
 
@@ -100,6 +120,7 @@ export class ProcessManager extends EventEmitter {
     };
 
     this.processes.set(id, proc);
+    this.persistSave(proc);
     const controller = new AbortController();
     this.controllers.set(id, controller);
 
@@ -124,6 +145,7 @@ export class ProcessManager extends EventEmitter {
     };
 
     this.processes.set(id, proc);
+    this.persistSave(proc);
     const controller = new AbortController();
     this.controllers.set(id, controller);
 
@@ -143,20 +165,50 @@ export class ProcessManager extends EventEmitter {
 
     proc.status = 'cancelled';
     proc.completedAt = new Date().toISOString();
+    this.persistUpdate(proc);
     this.emitEvent('process_cancelled', proc);
     this.controllers.delete(id);
     return true;
   }
 
-  listProcesses(status?: string): AgentProcess[] {
-    const all = Array.from(this.processes.values());
+  async listProcesses(status?: string): Promise<AgentProcess[]> {
+    // Start with in-memory processes (most up-to-date for running ones)
+    const inMemory = new Map(this.processes);
+
+    // Merge in historical processes from the DB
+    if (this.processRepo) {
+      const dbProcesses = await Promise.resolve(this.processRepo.list(status ? { status } : undefined));
+      for (const dbProc of dbProcesses) {
+        if (!inMemory.has(dbProc.id)) {
+          // Fill owner/repo from config (not stored in DB)
+          dbProc.owner = dbProc.owner || this.config.github.owner;
+          dbProc.repo = dbProc.repo || this.config.github.repo;
+          inMemory.set(dbProc.id, dbProc);
+        }
+      }
+    }
+
+    const all = Array.from(inMemory.values());
     if (status) return all.filter(p => p.status === status);
     return all;
   }
 
-  getProcess(id: string): AgentProcess | undefined {
+  async getProcess(id: string): Promise<AgentProcess | undefined> {
+    // In-memory first (has the latest state for running processes)
     const proc = this.processes.get(id);
-    return proc ? { ...proc, logs: [...proc.logs] } : undefined;
+    if (proc) return { ...proc, logs: [...proc.logs] };
+
+    // Fall back to DB
+    if (this.processRepo) {
+      const dbProc = await Promise.resolve(this.processRepo.getById(id));
+      if (dbProc) {
+        dbProc.owner = dbProc.owner || this.config.github.owner;
+        dbProc.repo = dbProc.repo || this.config.github.repo;
+        return dbProc;
+      }
+    }
+
+    return undefined;
   }
 
   getHistory() {
@@ -222,6 +274,7 @@ export class ProcessManager extends EventEmitter {
       proc.prNumber = result.prNumber ?? undefined;
       proc.prNumbers = result.prNumbers.length > 0 ? result.prNumbers : undefined;
       proc.outcome = result.outcome;
+      this.persistUpdate(proc);
       this.emitEvent('process_completed', proc);
     } catch (err: unknown) {
       if (signal.aborted) return;
@@ -229,6 +282,7 @@ export class ProcessManager extends EventEmitter {
       proc.status = 'failed';
       proc.completedAt = new Date().toISOString();
       proc.error = err instanceof Error ? err.message : String(err);
+      this.persistUpdate(proc);
       this.emitEvent('process_failed', proc);
     } finally {
       restore();
@@ -251,6 +305,7 @@ export class ProcessManager extends EventEmitter {
       proc.status = 'completed';
       proc.completedAt = new Date().toISOString();
       proc.outcome = result.summary;
+      this.persistUpdate(proc);
       this.emitEvent('process_completed', proc);
     } catch (err: unknown) {
       if (signal.aborted) return;
@@ -258,6 +313,7 @@ export class ProcessManager extends EventEmitter {
       proc.status = 'failed';
       proc.completedAt = new Date().toISOString();
       proc.error = err instanceof Error ? err.message : String(err);
+      this.persistUpdate(proc);
       this.emitEvent('process_failed', proc);
     } finally {
       restore();

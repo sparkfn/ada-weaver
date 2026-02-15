@@ -8,7 +8,9 @@ import {
   extractTaskInput,
   extractTextContent,
   extractSubagentResponse,
+  formatUsageSummaryComment,
 } from '../src/architect.js';
+import { UsageService } from '../src/usage-service.js';
 
 // ── buildArchitectSystemPrompt ──────────────────────────────────────────────
 
@@ -488,5 +490,104 @@ describe('extractSubagentResponse', () => {
       },
     };
     expect(extractSubagentResponse(output)).toBe('Real content');
+  });
+});
+
+// ── formatUsageSummaryComment ───────────────────────────────────────────────
+
+describe('formatUsageSummaryComment', () => {
+  it('returns null when there are no usage records', async () => {
+    const service = new UsageService();
+    expect(await formatUsageSummaryComment(service, 'proc-1')).toBeNull();
+  });
+
+  it('returns Markdown with total tokens and duration', async () => {
+    const service = new UsageService();
+    service.record({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+      agent: 'architect',
+      processId: 'proc-1',
+      inputTokens: 1000,
+      outputTokens: 500,
+      durationMs: 3000,
+    });
+
+    const comment = (await formatUsageSummaryComment(service, 'proc-1'))!;
+    expect(comment).toContain('Model Usage Summary');
+    expect(comment).toContain('1,500');  // total tokens
+    expect(comment).toContain('1,000');  // input tokens
+    expect(comment).toContain('500');    // output tokens
+    expect(comment).toContain('3s');     // duration
+    expect(comment).toContain('$');      // cost
+  });
+
+  it('includes per-agent breakdown table', async () => {
+    const service = new UsageService();
+    service.record({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+      agent: 'architect',
+      processId: 'proc-2',
+      inputTokens: 500,
+      outputTokens: 200,
+      durationMs: 1000,
+    });
+    service.record({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+      agent: 'coder',
+      processId: 'proc-2',
+      inputTokens: 2000,
+      outputTokens: 1000,
+      durationMs: 5000,
+    });
+
+    const comment = (await formatUsageSummaryComment(service, 'proc-2'))!;
+    expect(comment).toContain('Per-Agent Breakdown');
+    expect(comment).toContain('architect');
+    expect(comment).toContain('coder');
+  });
+
+  it('only includes records for the given processId', async () => {
+    const service = new UsageService();
+    service.record({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+      agent: 'architect',
+      processId: 'proc-a',
+      inputTokens: 100,
+      outputTokens: 50,
+      durationMs: 500,
+    });
+    service.record({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+      agent: 'coder',
+      processId: 'proc-b',
+      inputTokens: 9000,
+      outputTokens: 9000,
+      durationMs: 10000,
+    });
+
+    const comment = (await formatUsageSummaryComment(service, 'proc-a'))!;
+    expect(comment).toContain('150');     // 100 + 50 total tokens for proc-a
+    expect(comment).not.toContain('18,000'); // proc-b tokens excluded
+  });
+
+  it('includes footer text', async () => {
+    const service = new UsageService();
+    service.record({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+      agent: 'reviewer',
+      processId: 'proc-3',
+      inputTokens: 100,
+      outputTokens: 50,
+      durationMs: 200,
+    });
+
+    const comment = (await formatUsageSummaryComment(service, 'proc-3'))!;
+    expect(comment).toContain('Automated usage report by Deep Agents');
   });
 });

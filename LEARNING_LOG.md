@@ -5768,3 +5768,203 @@ This is advisory, not enforced. The Architect is an LLM making judgment calls ab
 - **Entry 47** (SSE Streaming): The `run_id` correlation pattern is similar to how we tracked `chatModelStartTime` for usage metrics — both rely on event pairing.
 - **Entry 45** (Architect Supervisor): The parallel execution is a direct extension of the Architect's non-deterministic workflow. The infrastructure now matches the capability LangGraph already provided.
 - **Entry 44** (Reviewer Bot): Parallel reviewers are now possible — multiple PRs can be reviewed simultaneously.
+
+---
+
+## Entry 50: LLM Usage Metrics — Full Observability for Token Costs
+
+**Date:** 2026-02-13
+**Author:** Architect Agent
+
+### The problem: no visibility into LLM costs
+
+With four different agent roles (Architect, Issuer, Coder, Reviewer) potentially using different models, there was no way to know how many tokens each agent consumed, what the estimated cost was, or how long LLM calls took. This makes it hard to optimize model assignments (e.g., using cheaper Haiku for the issuer vs Sonnet for the coder).
+
+### The solution: layered usage tracking
+
+Four new modules form the observability layer:
+
+1. **`usage-types.ts`** — TypeScript interfaces: `LLMUsageRecord` (provider, model, agent, tokens, duration, cost), `AgentRole` union type, `LLMProvider` union type
+2. **`usage-pricing.ts`** — per-model pricing data for input/output tokens across Anthropic and OpenAI models, with `estimateCost()` and `getModelPricing()` functions
+3. **`usage-repository.ts`** — in-memory storage with `add()`, `findAll()` (with filters), and `summarize()` aggregation
+4. **`usage-service.ts`** — service layer with `record()`, `summarize()`, `groupBy()` methods
+
+Usage is recorded from three entry points:
+- `runArchitect()` — records per-subagent usage via `on_chat_model_end` events
+- `runReviewSingle()` — records standalone reviewer usage
+- `createChatAgent()` — records chat usage
+
+The dashboard gained a **Usage tab** with summary cards and per-agent/per-model breakdown tables. REST API endpoints (`/api/usage/*`) serve the data. A `formatUsageSummaryComment()` function can post a Markdown usage summary directly to the GitHub issue.
+
+### Why this matters for per-agent model configuration
+
+The per-agent LLM configuration system (documented in Entry 24/45) enables cost optimization — use a cheap model (Haiku) for issue understanding, a capable model (Sonnet) for code generation, and track the results. Without usage metrics, you can't measure whether the optimization actually saves money. Now with both systems in place, you can:
+
+1. Configure different models per agent via `ISSUER_LLM_*`, `CODER_LLM_*`, `REVIEWER_LLM_*` env vars
+2. Run workloads and see per-agent token/cost breakdown in the dashboard
+3. Make data-driven decisions about which model to assign to each role
+
+### Connections to previous entries
+
+- **Entry 45** (Architect): The `resolveAgentLlmConfig()` function determines which LLM config applies to each agent — usage metrics record the actual model used.
+- **Entry 48** (Dashboard): The Usage tab extends the dashboard SPA with a third tab.
+- **Entry 49** (Parallel Subagents): Usage tracking correctly handles concurrent subagent runs via the `run_id` correlation.
+
+---
+
+## Entry 51: Human-in-the-Loop — The `/prompt` Command
+
+**Date:** 2026-02-13
+**Author:** Architect Agent
+
+### The problem: one-shot analysis with no feedback channel
+
+The agent processes issues autonomously — it reads, codes, and reviews. But sometimes the human reviewer sees the PR and wants to say "this approach is wrong, try X instead." Previously, the only option was to close the PR, rewrite the issue, and start over.
+
+### The solution: `/prompt` command on PRs
+
+When a human comments `/prompt <instructions>` on a bot-created PR, the webhook listener:
+
+1. Detects the `issue_comment.created` event on a PR (GitHub treats PR comments as issue comments)
+2. Parses the `/prompt` prefix and extracts the human's instructions
+3. Looks up the linked issue number from the PR body (`Closes #N`)
+4. Validates bot ownership (only triggers on bot-created PRs)
+5. Runs `runArchitect()` with `continueContext` that includes the human's feedback
+6. The Architect skips the issuer step and goes directly to reviewer→coder fix cycle, with the human's instructions guiding the coder
+
+This creates a conversational loop: human opens issue → bot creates PR → human reviews and gives feedback via `/prompt` → bot iterates.
+
+### Connections to previous entries
+
+- **Entry 48** (Dashboard/Continue): The `/prompt` handler reuses the same `continueContext` mechanism built for the `continue` CLI command.
+- **Entry 45** (Architect): The Architect's non-deterministic workflow naturally handles "skip issuer, go to fix cycle" via its system prompt.
+
+---
+
+## Entry 52: Unified Server and Permission Testing
+
+**Date:** 2026-02-15
+**Author:** Architect Agent
+
+### Unified `serve` command
+
+Running three separate servers (webhook on 3000, dashboard on 3000, dialog on 3001) was cumbersome during development. The new `deepagents serve` command mounts all three on a single Express app:
+- `/webhook` — GitHub webhook endpoint
+- `/api/*` — Dashboard REST API and SSE
+- `/dialog` and `/chat` — Chat/dialog endpoints
+- `/` — Dashboard SPA
+
+This simplifies deployment (one port, one process) and local development.
+
+### `test-access` command
+
+Before running the full pipeline, you need to know if your GitHub token actually has the right permissions. The `test-access` command performs a non-destructive round-trip:
+- **Issue test**: reads the issue, posts a comment, immediately deletes it
+- **PR test**: reads PR metadata + diff, posts a COMMENT review, immediately deletes it
+
+This catches permission issues early without polluting the repo with permanent artifacts.
+
+### extractTaskInput robustness
+
+The UNKNOWN agent name bug resurfaced because LangGraph's `streamEvents` v2 wraps tool input in yet another format: `ev.data.input = { input: JSON.stringify(args) }`. The new `extractTaskInput()` function tries 6 strategies in order, handling all observed LangGraph serialization formats. A diagnostic warning fires when all strategies fail, making future format changes easy to debug.
+
+### Connections to previous entries
+
+- **Entry 48** (Dashboard): The unified server embeds the dashboard app.
+- **Entry 44** (Reviewer Bot): The test-access PR check reuses the same diff + review tools.
+- **Entry 49** (Parallel): The `extractTaskInput` fix ensures correct agent labeling during concurrent runs.
+
+---
+
+## Entry 53: Per-Agent LLM Configuration — Architecture Deep Dive
+
+**Date:** 2026-02-15
+**Author:** Architect Agent
+
+### How per-agent model assignment works
+
+The project supports assigning different LLM models (and even different providers) to each agent role. This is the configuration hierarchy:
+
+```
+Agent-Specific LLM Config → Main LLM Config → Built-in Defaults
+```
+
+**Environment variables per role:**
+
+| Role | Env Var Prefix | Required? | Fallback |
+|------|---------------|-----------|----------|
+| Architect | `LLM_*` | Yes | — |
+| Issuer | `ISSUER_LLM_*` | No | Main LLM |
+| Coder | `CODER_LLM_*` | No | Main LLM |
+| Reviewer | `REVIEWER_LLM_*` | No | Main LLM |
+
+Each role accepts `_PROVIDER`, `_API_KEY`, `_MODEL`, and `_BASE_URL`. If you set any `*_LLM_*` var for a role, `_PROVIDER` becomes required (all-or-nothing validation in `config.ts`).
+
+### What happens when you don't configure per-agent LLMs
+
+If you only set the main `LLM_*` env vars and omit `ISSUER_LLM_*`, `CODER_LLM_*`, `REVIEWER_LLM_*`:
+
+1. `readLlmFromEnv('ISSUER_LLM')` returns `undefined` (no env vars found)
+2. `config.issuerLlm` is `undefined`
+3. In `createArchitect()`, `issuerModel` is `undefined`
+4. The subagent's `model` field is omitted from the `SubAgent` object
+5. The `deepagents` library falls back to the parent agent's (Architect's) model
+6. **All agents use the same main LLM** — this is the default and simplest setup
+
+### The wiring in code
+
+```typescript
+// src/architect.ts — createArchitect()
+const issuerModel = config.issuerLlm
+  ? createModel({ ...config, llm: config.issuerLlm })
+  : undefined;
+
+// SubAgent object — model only included if defined
+return {
+  name: 'issuer',
+  tools: [...],
+  systemPrompt: '...',
+  ...(opts.model ? { model: opts.model } : {}),
+};
+```
+
+The `resolveAgentLlmConfig()` helper centralizes the fallback logic for usage tracking:
+
+```typescript
+export function resolveAgentLlmConfig(config, agent) {
+  switch (agent) {
+    case 'issuer':  return config.issuerLlm ?? config.llm;
+    case 'coder':   return config.coderLlm ?? config.llm;
+    case 'reviewer': return config.reviewerLlm ?? config.llm;
+    default:        return config.llm;
+  }
+}
+```
+
+### Supported provider combinations
+
+You can mix providers across roles. Each role gets its own independent LLM client:
+
+```bash
+# Architect: Anthropic Sonnet (powerful orchestration)
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-4-20250514
+
+# Issuer: Anthropic Haiku (fast, cheap issue understanding)
+ISSUER_LLM_PROVIDER=anthropic
+ISSUER_LLM_MODEL=claude-haiku-4-5-20251001
+
+# Coder: Same as main (or omit entirely)
+# (not set — falls back to main LLM)
+
+# Reviewer: OpenAI GPT-4 (different perspective)
+REVIEWER_LLM_PROVIDER=openai
+REVIEWER_LLM_MODEL=gpt-4
+```
+
+### Connections to previous entries
+
+- **Entry 24** (Phase 4 Architecture): The original two-phase pipeline introduced `triageLlm` for using a cheaper model. This evolved into per-role LLMs.
+- **Entry 45** (Architect Supervisor): The Architect supervisor wires role-specific models to subagents via constructor injection.
+- **Entry 50** (Usage Metrics): Per-agent usage tracking makes the cost impact of model choices visible.
+- **Entry 25** (Triage Agent): The `triageLlm` concept (now `issuerLlm` with backward compat `TRIAGE_LLM_*`) was the first per-agent model override.

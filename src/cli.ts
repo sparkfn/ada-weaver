@@ -10,6 +10,7 @@ import { startWebhookServer, startDialogServer } from './listener.js';
 import { runReviewSingle } from './reviewer-agent.js';
 import { startDashboardServer, startUnifiedServer } from './dashboard.js';
 import { createGitHubClient, getAuthFromConfig } from './github-tools.js';
+import { UsageService } from './usage-service.js';
 
 // ── Signal handlers for graceful shutdown ────────────────────────────────────
 
@@ -49,6 +50,7 @@ const USAGE = `
 Usage: deepagents <command> [options]
 
 Commands:
+  migrate           Run database migrations (requires DATABASE_URL or PG_* env vars)
   test-access       Quick read/write test against GitHub (posts + deletes a comment)
   serve             Start unified server (dashboard + webhook + dialog on one port)
   poll              Run a poll cycle: fetch, analyze, comment, branch, PR
@@ -221,7 +223,37 @@ async function main() {
     return;
   }
 
-  // All commands except 'help' and 'kill' need config
+  if (command === 'migrate') {
+    const { initPool, closePool } = await import('./db/connection.js');
+    const { runMigrations } = await import('./db/migrate.js');
+
+    const databaseUrl = process.env.DATABASE_URL;
+    const dbConfig = {
+      databaseUrl: databaseUrl || undefined,
+      host: process.env.PG_HOST || undefined,
+      port: process.env.PG_PORT ? parseInt(process.env.PG_PORT, 10) : undefined,
+      database: process.env.PG_DATABASE || undefined,
+      user: process.env.PG_USER || undefined,
+      password: process.env.PG_PASSWORD || undefined,
+    };
+
+    if (!databaseUrl && !process.env.PG_HOST) {
+      console.error('Database config required. Set DATABASE_URL or PG_HOST in .env');
+      process.exit(1);
+    }
+
+    console.log('Running database migrations...\n');
+    const pool = initPool(dbConfig);
+    try {
+      const count = await runMigrations(pool);
+      console.log(count > 0 ? `\nApplied ${count} migration(s).` : '\nDatabase is up to date.');
+    } finally {
+      await closePool();
+    }
+    return;
+  }
+
+  // All commands except 'help', 'kill', and 'migrate' need config
   const config = loadConfig();
 
   switch (command) {
@@ -367,7 +399,16 @@ async function main() {
       }
 
       console.log('\u{1F916} Deep Agents GitHub Issue Poller\n');
-      await runPollCycle(config, { dryRun, noSave, maxIssues, maxToolCalls });
+      const { createRepositories: createPollRepos } = await import('./db/repositories.js');
+      const pollRepos = await createPollRepos(config);
+      await runPollCycle(config, {
+        dryRun,
+        noSave,
+        maxIssues,
+        maxToolCalls,
+        pollRepository: pollRepos.pollRepository,
+        repoId: pollRepos.repoId,
+      });
       break;
     }
 
@@ -388,7 +429,9 @@ async function main() {
       const dryRun = flags['dry-run'] === true;
 
       console.log('\u{1F916} Deep Agents Architect\n');
-      const result = await runArchitect(config, issueNumber, { dryRun });
+      const usageService = new UsageService();
+      const processId = `analyze-${issueNumber}-${Date.now()}`;
+      const result = await runArchitect(config, issueNumber, { dryRun, usageService, processId });
 
       console.log('\n' + '\u{2500}'.repeat(60));
       console.log('\u{1F4CB} Architect summary:');
@@ -434,8 +477,12 @@ async function main() {
       }
 
       console.log('\u{1F916} Deep Agents Continue\n');
+      const contUsageService = new UsageService();
+      const contProcessId = `continue-${contIssueNumber}-${Date.now()}`;
       const contResult = await runArchitect(config, contIssueNumber, {
         continueContext: { prNumber: contPrNumber, branchName: contBranch },
+        usageService: contUsageService,
+        processId: contProcessId,
       });
 
       console.log('\n' + '\u{2500}'.repeat(60));
@@ -512,7 +559,12 @@ async function main() {
       }
 
       console.log('\u{1F916} Deep Agents Unified Server\n');
-      activeServer = startUnifiedServer(config);
+      const { createRepositories } = await import('./db/repositories.js');
+      const repos = await createRepositories(config);
+      activeServer = startUnifiedServer(config, {
+        usageRepository: repos.usageRepository,
+        processRepository: repos.processRepository,
+      });
       // Server runs until process is killed (SIGTERM/SIGINT)
       break;
     }
@@ -553,7 +605,12 @@ async function main() {
       }
 
       console.log('\u{1F916} Deep Agents Dashboard\n');
-      activeServer = startDashboardServer(config, dashPort);
+      const { createRepositories: createDashRepos } = await import('./db/repositories.js');
+      const dashRepos = await createDashRepos(config);
+      activeServer = startDashboardServer(config, dashPort, {
+        usageRepository: dashRepos.usageRepository,
+        processRepository: dashRepos.processRepository,
+      });
       // Server runs until process is killed (SIGTERM/SIGINT)
       break;
     }
@@ -566,7 +623,7 @@ async function main() {
     }
 
     case 'status': {
-      showStatus(config);
+      await showStatus(config);
       break;
     }
 

@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: deepagents-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: deepagents
+      POSTGRES_USER: deepagents
+      POSTGRES_PASSWORD: deepagents
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deepagents -d deepagents"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
+
   bot:
     build: .
     container_name: deepagents-bot
@@ -6,12 +23,15 @@ services:
     env_file: .env
     environment:
       - GITHUB_APP_PEM_PATH=/app/app.pem  # override host path for container
+      - DATABASE_URL=postgresql://deepagents:deepagents@postgres:5432/deepagents
     expose:
       - "3000"
     volumes:
-      - ./last_poll.json:/app/last_poll.json
       - ./issues:/app/issues
       - ${GITHUB_APP_PEM_PATH:-./app.pem}:/app/app.pem:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)throw r.status}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -38,5 +58,6 @@ services:
         condition: service_healthy
 
 volumes:
+  pgdata:
   caddy_data:
   caddy_config:

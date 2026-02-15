@@ -50,10 +50,10 @@ GitHub  --webhook-->  deepagents webhook  -->  issues.opened  --> Architect
 - A GitHub account with either a [Personal Access Token](https://github.com/settings/tokens) or a [GitHub App](#github-app) (see below)
 - An LLM API key (e.g. [Anthropic](https://console.anthropic.com), OpenAI, or a local model via Ollama)
 
-**Optional (for deployment):**
+**Optional:**
 
-- [Docker](https://docs.docker.com/get-docker/) and Docker Compose (for containerized deployment)
-- A domain name managed by Cloudflare (for production HTTPS via Caddy with DNS challenge)
+- [PostgreSQL](https://www.postgresql.org/) 15+ (for persistent storage — without it, the system uses file/in-memory storage)
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose (for containerized deployment — includes PostgreSQL automatically)
 
 ## Setup
 
@@ -102,7 +102,7 @@ LLM_MODEL=claude-sonnet-4-20250514
 # WEBHOOK_SECRET=your-secret   # generate with: openssl rand -hex 32
 ```
 
-See `.env.example` for the full list including GitHub App auth, limits, and Docker/Caddy settings.
+See `.env.example` for the full list including GitHub App auth, database, limits, and Docker/Caddy settings.
 
 **Notes:**
 - `ISSUER_LLM_*` / `CODER_LLM_*` / `REVIEWER_LLM_*` are optional — omit them to use the main LLM for everything. Set `_PROVIDER` to enable. Legacy `TRIAGE_LLM_*` env vars are also accepted for backward compat.
@@ -169,7 +169,37 @@ GITHUB_APP_PEM_PATH=/home/you/.config/deep-agents/app.pem
 GITHUB_APP_INSTALLATION_ID=12345678
 ```
 
-### 4. Test a single run
+### 4. Database setup (optional)
+
+By default, the system uses `last_poll.json` for poll state and in-memory storage for usage metrics and process history — all lost on restart. For persistent storage, configure PostgreSQL:
+
+**Option A: Connection URL (recommended for Docker/production)**
+
+```bash
+DATABASE_URL=postgresql://deepagents:password@localhost:5432/deepagents
+```
+
+**Option B: Individual fields (for local dev)**
+
+```bash
+PG_HOST=localhost
+PG_PORT=5432
+PG_DATABASE=deepagents
+PG_USER=deepagents
+PG_PASSWORD=password
+```
+
+Run migrations to create the schema:
+
+```bash
+pnpm migrate
+```
+
+When using Docker Compose, PostgreSQL is included automatically — no manual setup needed.
+
+If no database config is set, the system falls back to file/in-memory storage (existing behavior, zero setup required).
+
+### 5. Test a single run
 
 ```bash
 pnpm start
@@ -210,7 +240,7 @@ After the run, check:
 - **GitHub PRs** — should have a new draft PR titled "Fix #1: ..."
 - **`last_poll.json`** — should exist with the timestamp and processed issue numbers
 
-### 5. Test a second run (polling)
+### 6. Test a second run (polling)
 
 Run `pnpm start` again. This time the agent should skip already-processed issues:
 
@@ -228,6 +258,7 @@ Choose the mode that fits your use case:
 | Mode | Best for | How it works |
 |------|----------|--------------|
 | **Cron polling** | Simple, low-volume repos | Cron job runs `poll.sh` on a schedule |
+| **Unified server** | Local dev / staging | `deepagents serve` runs dashboard + webhook + dialog on one port |
 | **Webhook (local)** | Development / testing | `pnpm webhook` listens for GitHub events |
 | **Dialog** | Interactive chat | `pnpm dialog` opens a web UI for human-agent conversation |
 | **Docker + Caddy** | Production deployment | Containerized webhook listener with auto-HTTPS |
@@ -326,19 +357,18 @@ Run the webhook listener in Docker. Two options: **local testing** (bot only) or
 
 #### Create runtime files
 
-The bot needs `last_poll.json` and `issues/` to exist before mounting:
+The bot needs `issues/` to exist before mounting:
 
 ```bash
-touch last_poll.json
 mkdir -p issues
 ```
 
-#### Option A: Local testing (bot only)
+#### Option A: Local testing (bot + postgres)
 
-Run just the bot container without Caddy — useful for testing or development:
+Run the bot and postgres containers without Caddy — useful for testing or development:
 
 ```bash
-docker compose up -d --build bot
+docker compose up -d --build bot postgres
 ```
 
 Verify it's working:
@@ -404,8 +434,9 @@ docker compose up -d --build
 
 The first build takes a bit longer as it compiles a custom Caddy binary with the Cloudflare DNS plugin.
 
-This starts two containers:
-- **bot** -- the webhook listener on port 3000 (internal only)
+This starts three containers:
+- **postgres** -- PostgreSQL 17 database for persistent storage (poll state, usage metrics, process history)
+- **bot** -- the webhook listener on port 3000 (internal only), auto-migrates database on startup
 - **caddy** -- reverse proxy on ports 80/443 with automatic TLS via Cloudflare DNS challenge
 
 **5. Verify**
@@ -442,6 +473,9 @@ Caddy's TLS certificates persist in the `caddy_data` volume across restarts.
 The project provides a CLI with subcommands:
 
 ```bash
+# Run database migrations (requires DATABASE_URL or PG_* env vars)
+pnpm migrate
+
 # Run a poll cycle (fetch + analyze + comment + branch + PR)
 pnpm run cli poll
 
@@ -474,6 +508,15 @@ pnpm run cli dialog --port 8080
 # Show current polling state
 pnpm run cli status
 
+# Start unified server (dashboard + webhook + dialog on one port)
+pnpm run cli serve
+pnpm run cli serve --port 8080
+
+# Quick permission check (posts + deletes a test comment/review)
+pnpm run cli test-access --issue 1
+pnpm run cli test-access --pr 10
+pnpm run cli test-access --issue 1 --pr 10
+
 # Show help
 pnpm run cli help
 ```
@@ -490,7 +533,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-408 tests across 14 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+481 tests across 14 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 
@@ -509,6 +552,8 @@ pnpm run test:watch
 | Webhook not firing | In GitHub repo → Settings → Webhooks, check that "Issues" and "Pull requests" events are selected |
 | `EADDRINUSE` when starting webhook | Another process is using the port; change `WEBHOOK_PORT` in `.env` or stop the other process |
 | `HTTPS for localhost` warning | You have `https://localhost` as a baseUrl — Ollama and local models use `http://`, not `https://` |
+| `Database pool not initialized` | Set `DATABASE_URL` or `PG_HOST` in `.env` (or remove database config to use file/in-memory fallback) |
+| Migration fails | Ensure PostgreSQL is running and the connection credentials are correct |
 | Caddy fails to get TLS cert | Check `CLOUDFLARE_API_TOKEN` is set in `.env` and the token has Zone/DNS permissions |
 
 ## File Structure
@@ -516,46 +561,66 @@ pnpm run test:watch
 ```
 learning-deep-agents/
   src/
-    cli.ts            -- CLI entry point (subcommands: poll, analyze, review, webhook, dialog, status)
+    cli.ts            -- CLI entry point (subcommands: poll, analyze, review, webhook, dialog, serve, migrate, test-access, status)
     core.ts           -- Shared logic (poll cycle, state management, graceful shutdown)
     architect.ts      -- Architect supervisor agent with Issuer, Coder, Reviewer subagents
     index.ts          -- Original entry point (thin wrapper, backwards-compatible)
-    config.ts         -- Loads config from .env (GitHub + LLM + webhook)
+    config.ts         -- Loads config from .env (GitHub + LLM + webhook + database)
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
     github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR, commit, review)
     reviewer-agent.ts -- Standalone PR reviewer agent (diff reader, source context, review submitter)
     logger.ts         -- Structured logging (tool calls, agent events, colored diff output)
     utils.ts          -- Retry with exponential backoff for API calls
     chat-agent.ts     -- Chat agent for human-agent interaction (read-only tools + checkpointer)
-    listener.ts       -- Express webhook server, dialog server, HMAC-SHA256 verification
+    listener.ts       -- Express webhook server, dialog server, /prompt handler, HMAC-SHA256 verification
     process-manager.ts -- EventEmitter-based agent process lifecycle manager
-    dashboard.ts      -- Express server for web dashboard (REST API + SSE)
+    dashboard.ts      -- Express server for web dashboard (REST API + SSE + unified serve mode)
+    usage-types.ts    -- TypeScript interfaces for LLM usage tracking (LLMUsageRecord, AgentRole, etc.)
+    usage-pricing.ts  -- Per-model token pricing data (Anthropic + OpenAI models)
+    usage-repository.ts -- In-memory usage record storage with filtering and aggregation
+    usage-service.ts  -- Usage recording, summarization, and groupBy service layer
+    poll-repository.ts    -- PollRepository interface + FilePollRepository (file-based fallback)
+    process-repository.ts -- ProcessRepository interface + InMemoryProcessRepository (in-memory fallback)
+    repo-repository.ts    -- RepoRepository interface + StaticRepoRepository (env-var fallback)
+    db/
+      connection.ts       -- PostgreSQL pool singleton (from DATABASE_URL or PG_* env vars)
+      migrate.ts          -- Migration runner (reads SQL files, applies in transactions)
+      repositories.ts     -- Factory: createRepositories(config) returns PG or file/in-memory repos
+      pg-repo-repository.ts    -- PostgresRepoRepository (manages repos table)
+      pg-poll-repository.ts    -- PostgresPollRepository (poll_state + issue_actions)
+      pg-usage-repository.ts   -- PostgresUsageRepository (llm_usage CRUD + aggregations)
+      pg-process-repository.ts -- PostgresProcessRepository (agent_processes persistence)
+      migrations/
+        001_initial_schema.sql -- Full schema: repos, poll_state, issue_actions, agent_processes, llm_usage
   tests/
-    architect.test.ts -- Architect supervisor, subagent factories, system prompt tests
+    architect.test.ts -- Architect supervisor, subagent factories, extractTaskInput, system prompt tests
     core.test.ts      -- Unit tests for core logic, state, graceful shutdown
     github-tools.test.ts -- Idempotency and tool tests (mocked Octokit)
     model.test.ts     -- Provider routing tests (mocked LLM constructors)
     config.test.ts    -- Config validation tests (mocked fs, process.exit)
     reviewer-agent.test.ts -- PR review tool and diff tool tests
-    logger.test.ts    -- Structured logging wrapper tests
+    logger.test.ts    -- Structured logging, extractTextContent, logAgentDetail tests
     utils.test.ts     -- Retry logic and error classification tests
-    listener.test.ts  -- Webhook endpoint and signature verification tests
+    listener.test.ts  -- Webhook endpoint, signature verification, /prompt handler tests
     process-manager.test.ts -- Process lifecycle, log capture, cancellation tests
-    dashboard.test.ts -- Dashboard REST API and SSE endpoint tests
+    dashboard.test.ts -- Dashboard REST API, SSE, and usage endpoint tests
+    usage-pricing.test.ts -- Per-model pricing lookup tests
+    usage-repository.test.ts -- In-memory storage, filtering, summary aggregation tests
+    usage-service.test.ts -- Usage recording, summarization, groupBy tests
   issues/             -- Generated: detailed analysis files
   static/
     dialog.html       -- Chat UI for testing agent-human interaction
     dashboard.html    -- React + MUI dashboard SPA for managing agent processes
   .env                -- Your credentials and settings (git-ignored, single source of truth)
   .env.example        -- Comprehensive template for .env
-  last_poll.json      -- Generated: polling state (git-ignored)
+  last_poll.json      -- Generated: polling state (git-ignored, not needed with database)
   poll.sh             -- Cron wrapper script
   poll.log            -- Generated: cron run logs (git-ignored)
   LEARNING_LOG.md     -- Project learning narrative
   CLAUDE.md           -- Claude Code project instructions
   Dockerfile          -- Container image definition (bot)
   Dockerfile.caddy    -- Custom Caddy build with Cloudflare DNS plugin
-  docker-compose.yml  -- Bot + Caddy reverse proxy stack
+  docker-compose.yml  -- Bot + PostgreSQL + Caddy reverse proxy stack
   Caddyfile   -- Caddy config (committable — uses {$DOMAIN} env var)
   .dockerignore       -- Files excluded from Docker build context
 ```
@@ -565,8 +630,12 @@ learning-deep-agents/
 To re-analyze all issues from scratch:
 
 ```bash
+# File-based mode:
 rm last_poll.json
 pnpm start
+
+# Database mode:
+# Truncate the poll_state and issue_actions tables, then restart
 ```
 
 To clean up generated files:

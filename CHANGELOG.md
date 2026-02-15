@@ -9,6 +9,89 @@
 
 ---
 
+## v1.7.0 — 2026-02-15
+
+**PostgreSQL Persistence & Multi-Repo Schema.** Adds PostgreSQL as an optional persistence layer, replacing file-based poll state (`last_poll.json`) and in-memory storage for LLM usage metrics and agent process history. Poll state, issue actions, agent processes, and usage records all survive restarts when a database is configured. The schema supports multiple repositories via a `repos` table. Without `DATABASE_URL`, the system falls back to file/in-memory storage (existing behavior unchanged).
+
+### Added
+- **Database schema** (`src/db/migrations/001_initial_schema.sql`) — 6 tables: `repos`, `poll_state`, `issue_actions`, `agent_processes`, `llm_usage`, `schema_migrations` with appropriate indexes
+- **Connection pool** (`src/db/connection.ts`) — singleton `initPool()`/`getPool()` from `DATABASE_URL` or individual `PG_*` env vars
+- **Migration runner** (`src/db/migrate.ts`) — discovers SQL files in `src/db/migrations/`, runs unapplied ones in transactions, tracks applied versions in `schema_migrations`
+- **Repository interfaces** — `PollRepository` (`src/poll-repository.ts`), `ProcessRepository` (`src/process-repository.ts`), `RepoRepository` (`src/repo-repository.ts`)
+- **File/in-memory implementations** — `FilePollRepository`, `InMemoryProcessRepository`, `StaticRepoRepository` (wrap existing logic, zero behavior change)
+- **PostgreSQL implementations** — `PostgresRepoRepository` (`src/db/pg-repo-repository.ts`), `PostgresPollRepository` (`src/db/pg-poll-repository.ts`), `PostgresUsageRepository` (`src/db/pg-usage-repository.ts`), `PostgresProcessRepository` (`src/db/pg-process-repository.ts`)
+- **Repository factory** (`src/db/repositories.ts`) — `createRepositories(config)` returns PG or file/in-memory repos based on whether `config.database` is set; auto-runs migrations and seeds the `repos` table on startup
+- **`migrate` CLI command** — `deepagents migrate` runs database migrations standalone; also available as `pnpm migrate`
+- **Database config** in `src/config.ts` — reads `DATABASE_URL` or `PG_HOST`/`PG_PORT`/`PG_DATABASE`/`PG_USER`/`PG_PASSWORD`
+- **`repoId` field** on `LLMUsageRecord` and `UsageQuery` in `src/usage-types.ts` — supports multi-repo filtering
+- **PostgreSQL Docker service** in `docker-compose.yml` — `postgres:17-alpine` with health check, `pgdata` volume, `DATABASE_URL` wired to bot
+
+### Changed
+- `runPollCycle()`, `showStatus()`, `retractIssue()` in `src/core.ts` accept optional `PollRepository` parameter (backward-compatible default: `FilePollRepository`); all poll repo calls are now `await`-ed for async PG support
+- `ProcessManager` accepts optional `ProcessRepository`; persists process state on start/complete/fail/cancel; `listProcesses()` and `getProcess()` now merge in-memory (running) with DB (historical) so completed processes survive restarts
+- `UsageRepository` interface returns `T | Promise<T>` to support both sync (in-memory) and async (PG) implementations
+- `UsageService` methods (`query`, `summarize`, `groupBy`, `count`, `getById`) are now `async`; `record()` uses fire-and-forget for async repos
+- `PollRepository` interface returns `T | Promise<T>` for the same reason
+- `formatUsageSummaryComment()` in `architect.ts` is now `async`
+- `createDashboardApp()`, `createUnifiedApp()`, `startDashboardServer()`, `startUnifiedServer()` accept optional `DashboardOptions` with injected `UsageRepository` and `ProcessRepository`
+- Dashboard API handlers (`/api/status`, `/api/processes`, `/api/usage/*`) are now `async` with `await`
+- `serve`, `dashboard`, `poll` CLI commands initialize repositories via `createRepositories()` factory
+- `docker-compose.yml`: added `postgres` service, bot `depends_on: postgres`, `DATABASE_URL` env var, removed `last_poll.json` volume mount
+- `InMemoryUsageRepository.matchesFilter()` now supports `repoId` filter
+- `.env.example` updated with database config section
+
+### Fixed
+- **PostgreSQL usage insert crash** — `durationMs` (a float from `performance.now()`) was being inserted into an `INTEGER` column; now rounded with `Math.round()`
+- **Migration regex for multiline SQL** — `schema_migrations` table regex changed from `[^)]+` to `[\s\S]*?` to match multiline `CREATE TABLE` statements
+
+### Dependencies
+- Added `pg` (production), `@types/pg` (dev)
+
+---
+
+## v1.6.0 — 2026-02-15
+
+**LLM Usage Metrics, Human-in-the-Loop Feedback, Unified Server, and Permission Testing.** Adds full LLM observability (token usage, cost estimation, per-agent breakdown), a `/prompt` command for humans to give feedback on bot PRs via webhook, a unified `serve` command, and a `test-access` CLI command for verifying GitHub permissions.
+
+### Added
+- **LLM usage metrics** (`src/usage-types.ts`, `src/usage-pricing.ts`, `src/usage-repository.ts`, `src/usage-service.ts`) — in-memory token/cost/latency tracking per agent per process
+  - Per-model pricing data for Anthropic (Claude Sonnet, Haiku, Opus) and OpenAI (GPT-4, GPT-4o, GPT-3.5-turbo)
+  - `UsageRepository` with in-memory storage, filtering by processId/agent/provider/model, and summary aggregation
+  - `UsageService` with `record()`, `summarize()`, `groupBy()` methods
+  - REST API: `GET /api/usage/summary`, `GET /api/usage/records`, `GET /api/usage/by-agent`, `GET /api/usage/by-model`
+  - **Usage tab** in web dashboard — summary cards, per-agent breakdown table, per-model breakdown table
+  - SSE streaming of usage events to dashboard
+  - Usage recording wired into `runArchitect()`, `runReviewSingle()`, and `createChatAgent()`
+- **`/prompt` command** for human-in-the-loop PR feedback — when a human comments `/prompt <instructions>` on a bot-created PR, the webhook listener triggers the Architect's review→fix cycle with the human's feedback as context for the coder
+  - `handlePrCommentEvent()` in `listener.ts` — parses `/prompt` from `issue_comment.created` events on PRs
+  - Extracts issue number from PR body (`Closes #N`), validates bot ownership, then runs `runArchitect()` with `continueContext`
+  - Dashboard process created for tracking
+- **`test-access` CLI command** — quickly verifies GitHub API permissions without running the full pipeline
+  - `deepagents test-access --issue N` — reads issue, posts a test comment, deletes it
+  - `deepagents test-access --pr N` — reads PR metadata + diff, posts a test review, removes it
+  - Supports `--issue N --pr N` for combined check
+- **`serve` CLI command** — unified server combining dashboard + webhook + dialog on a single port
+  - `deepagents serve --port 3000` replaces running separate `webhook`, `dashboard`, and `dialog` commands
+  - Dialog routes mounted under `/dialog` and `/chat`
+  - `PORT` env var as default
+- **`extractTextContent()`** helper in `logger.ts` — extracts text from LLM array-style content blocks (handles both string and `{ type: 'text', text: '...' }` formats)
+- **`logAgentDetail()`** in `logger.ts` — verbose agent I/O logging for debugging
+- **Architect reasoning logs** — when no subagent is active, the Architect's own reasoning is logged for observability
+- **`formatUsageSummaryComment()`** in `architect.ts` — formats a Markdown usage summary (tokens, cost, per-agent breakdown) for posting to GitHub issues
+- **Dashboard process deduplication** — prevents duplicate processes for the same issue
+- 73 new tests: usage-pricing (7), usage-repository (14), usage-service (10), dashboard usage API (8), listener /prompt (17), architect extractTaskInput (9), logger extractTextContent/logAgentDetail (8) — **481 tests total**
+
+### Fixed
+- **UNKNOWN agent name in streamEvents** — `extractTaskInput()` now tries 6 strategies to extract subagent type from LangGraph's various event formats (direct object, JSON string, nested args/input/tool_input, full stringify-regex fallback); includes diagnostic warning when all strategies fail
+- **Webhook HMAC verification crash** (`ERR_INVALID_ARG_TYPE`) — `express.json()` global middleware was parsing the body before route-level `express.raw()` could preserve it as a Buffer; fixed by skipping JSON parsing for `/webhook` path
+
+### Changed
+- `runArchitect()` accepts `usageService` and `processId` options for usage tracking and summary comment posting
+- CLI help text updated with `test-access` and `serve` commands
+- `.env.example` updated with `PORT` env var
+
+---
+
 ## v1.5.0 — 2026-02-13
 
 **Parallel Subagent Support.** The Architect supervisor can now spawn concurrent subagents for independent tasks. When an issue has multiple independent sub-tasks, the Architect can delegate to multiple coders or reviewers in parallel instead of running them sequentially.

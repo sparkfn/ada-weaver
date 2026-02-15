@@ -18,7 +18,8 @@
     "webhook": "tsx src/cli.ts webhook",
     "dialog": "tsx src/cli.ts dialog",
     "dashboard": "tsx src/cli.ts dashboard",
-    "continue": "tsx src/cli.ts continue"
+    "continue": "tsx src/cli.ts continue",
+    "migrate": "tsx src/cli.ts migrate"
   },
   "dependencies": {
     "@langchain/anthropic": "^1.3.0",
@@ -31,11 +32,13 @@
     "express": "^5.2.0",
     "langchain": "^1.2.0",
     "octokit": "^5.0.0",
+    "pg": "^8.18.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.16.0",
     "tsx": "^4.7.0",
     "vitest": "^3.0.0"
   }

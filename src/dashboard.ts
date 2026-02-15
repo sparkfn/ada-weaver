@@ -6,6 +6,8 @@ import type { Config } from './config.js';
 import { ProcessManager } from './process-manager.js';
 import { UsageService } from './usage-service.js';
 import type { UsageQuery, UsageGroupBy } from './usage-types.js';
+import type { UsageRepository } from './usage-repository.js';
+import type { ProcessRepository } from './process-repository.js';
 import { verifySignature, handleWebhookEvent } from './listener.js';
 import { chatStream } from './chat-agent.js';
 
@@ -45,10 +47,15 @@ function parseUsageQuery(query: Record<string, any>): UsageQuery {
 
 // ── Express app factory ──────────────────────────────────────────────────────
 
-export function createDashboardApp(config: Config): { app: express.Express; processManager: ProcessManager; usageService: UsageService } {
+export interface DashboardOptions {
+  usageRepository?: UsageRepository;
+  processRepository?: ProcessRepository;
+}
+
+export function createDashboardApp(config: Config, options?: DashboardOptions): { app: express.Express; processManager: ProcessManager; usageService: UsageService } {
   const app = express();
-  const usageService = new UsageService();
-  const processManager = new ProcessManager(config, usageService);
+  const usageService = new UsageService(options?.usageRepository);
+  const processManager = new ProcessManager(config, usageService, options?.processRepository);
 
   // Parse JSON for all routes except /webhook (which needs the raw body for HMAC)
   app.use((req, res, next) => {
@@ -67,8 +74,8 @@ export function createDashboardApp(config: Config): { app: express.Express; proc
   });
 
   // Status summary
-  app.get('/api/status', (_req: Request, res: Response) => {
-    const all = processManager.listProcesses();
+  app.get('/api/status', async (_req: Request, res: Response) => {
+    const all = await processManager.listProcesses();
     const running = all.filter(p => p.status === 'running');
     res.json({
       owner: config.github.owner,
@@ -79,15 +86,15 @@ export function createDashboardApp(config: Config): { app: express.Express; proc
   });
 
   // List processes
-  app.get('/api/processes', (req: Request, res: Response) => {
+  app.get('/api/processes', async (req: Request, res: Response) => {
     const status = typeof req.query.status === 'string' ? req.query.status : undefined;
-    const processes = processManager.listProcesses(status);
+    const processes = await processManager.listProcesses(status);
     res.json(processes.map(p => ({ ...p, logs: [] })));
   });
 
   // Get single process (includes logs)
-  app.get('/api/processes/:id', (req: Request, res: Response) => {
-    const proc = processManager.getProcess(req.params.id);
+  app.get('/api/processes/:id', async (req: Request, res: Response) => {
+    const proc = await processManager.getProcess(req.params.id);
     if (!proc) {
       res.status(404).json({ error: 'Process not found' });
       return;
@@ -163,28 +170,30 @@ export function createDashboardApp(config: Config): { app: express.Express; proc
   // ── Usage API endpoints ─────────────────────────────────────────────────────
 
   // Usage summary
-  app.get('/api/usage/summary', (req: Request, res: Response) => {
+  app.get('/api/usage/summary', async (req: Request, res: Response) => {
     const filter = parseUsageQuery(req.query);
-    res.json(usageService.summarize(filter));
+    res.json(await usageService.summarize(filter));
   });
 
   // Usage records (paginated)
-  app.get('/api/usage/records', (req: Request, res: Response) => {
+  app.get('/api/usage/records', async (req: Request, res: Response) => {
     const filter = parseUsageQuery(req.query);
-    const records = usageService.query(filter);
-    const total = usageService.count(filter);
+    const [records, total] = await Promise.all([
+      usageService.query(filter),
+      usageService.count(filter),
+    ]);
     res.json({ records, total });
   });
 
   // Usage group by
-  app.get('/api/usage/group/:groupBy', (req: Request, res: Response) => {
+  app.get('/api/usage/group/:groupBy', async (req: Request, res: Response) => {
     const groupBy = req.params.groupBy as UsageGroupBy;
     if (!VALID_GROUP_BY.has(groupBy)) {
       res.status(400).json({ error: `Invalid groupBy: ${groupBy}. Must be one of: ${[...VALID_GROUP_BY].join(', ')}` });
       return;
     }
     const filter = parseUsageQuery(req.query);
-    res.json(usageService.groupBy(groupBy, filter));
+    res.json(await usageService.groupBy(groupBy, filter));
   });
 
   // ── SSE event stream ────────────────────────────────────────────────────────
@@ -226,8 +235,8 @@ export function createDashboardApp(config: Config): { app: express.Express; proc
 
 // ── Server start ─────────────────────────────────────────────────────────────
 
-export function startDashboardServer(config: Config, port: number) {
-  const { app } = createDashboardApp(config);
+export function startDashboardServer(config: Config, port: number, options?: DashboardOptions) {
+  const { app } = createDashboardApp(config, options);
 
   const server = app.listen(port, () => {
     console.log(`[dashboard] Listening on port ${port}`);
@@ -242,8 +251,8 @@ export function startDashboardServer(config: Config, port: number) {
 
 // ── Unified server (dashboard + webhook + dialog on one port) ───────────────
 
-export function createUnifiedApp(config: Config): { app: express.Express; processManager: ProcessManager; usageService: UsageService } {
-  const { app, processManager, usageService } = createDashboardApp(config);
+export function createUnifiedApp(config: Config, options?: DashboardOptions): { app: express.Express; processManager: ProcessManager; usageService: UsageService } {
+  const { app, processManager, usageService } = createDashboardApp(config, options);
 
   // ── Webhook route ───────────────────────────────────────────────────────────
   // Raw body parsing for HMAC verification (must be before json middleware hits this path)
@@ -340,9 +349,9 @@ export function createUnifiedApp(config: Config): { app: express.Express; proces
   return { app, processManager, usageService };
 }
 
-export function startUnifiedServer(config: Config) {
+export function startUnifiedServer(config: Config, options?: DashboardOptions) {
   const port = config.port ?? 3000;
-  const { app } = createUnifiedApp(config);
+  const { app } = createUnifiedApp(config, options);
 
   const server = app.listen(port, () => {
     console.log(`[serve] Listening on port ${port}`);

@@ -55,28 +55,31 @@ export class UsageService extends EventEmitter {
       estimatedCost: calculateCost(input.model, input.provider, input.inputTokens, input.outputTokens),
     };
 
-    this.repository.add(record);
+    // Fire-and-forget: works for both sync (in-memory) and async (PG) repos
+    Promise.resolve(this.repository.add(record)).catch(err =>
+      console.error('[usage-service] Failed to persist usage record:', err),
+    );
     this.emit('usage_recorded', record);
     return record;
   }
 
-  query(filter?: UsageQuery): LLMUsageRecord[] {
+  async query(filter?: UsageQuery): Promise<LLMUsageRecord[]> {
     return this.repository.query(filter);
   }
 
-  getById(id: string): LLMUsageRecord | undefined {
+  async getById(id: string): Promise<LLMUsageRecord | undefined> {
     return this.repository.getById(id);
   }
 
-  summarize(filter?: UsageQuery): UsageSummary {
+  async summarize(filter?: UsageQuery): Promise<UsageSummary> {
     return this.repository.summarize(filter);
   }
 
-  groupBy(key: UsageGroupBy, filter?: UsageQuery): UsageAggregation[] {
+  async groupBy(key: UsageGroupBy, filter?: UsageQuery): Promise<UsageAggregation[]> {
     return this.repository.groupBy(key, filter);
   }
 
-  count(filter?: UsageQuery): number {
+  async count(filter?: UsageQuery): Promise<number> {
     return this.repository.count(filter);
   }
 

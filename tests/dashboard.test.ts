@@ -256,10 +256,10 @@ describe('Dashboard API', () => {
     it('process response includes activePhases field when set', async () => {
       const proc = processManager.startAnalysis(42);
       // Manually set activePhases on the process for testing
-      const internal = processManager.getProcess(proc.id);
+      const internal = await processManager.getProcess(proc.id);
       if (internal) {
         // Access internal map via listProcesses
-        const procs = processManager.listProcesses();
+        const procs = await processManager.listProcesses();
         const target = procs.find(p => p.id === proc.id);
         if (target) {
           target.activePhases = ['coder', 'reviewer'];
@@ -273,7 +273,7 @@ describe('Dashboard API', () => {
 
     it('process response includes prNumbers field when set', async () => {
       const proc = processManager.startAnalysis(42);
-      const procs = processManager.listProcesses();
+      const procs = await processManager.listProcesses();
       const target = procs.find(p => p.id === proc.id);
       if (target) {
         target.prNumbers = [10, 11];

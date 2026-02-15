@@ -605,7 +605,10 @@ describe('handleIssuesEvent', () => {
 
     expect(result.handled).toBe(true);
     expect(result.issueNumber).toBe(42);
-    expect(runArchitect).toHaveBeenCalledWith(config, 42);
+    expect(runArchitect).toHaveBeenCalledWith(config, 42, expect.objectContaining({
+      usageService: expect.any(Object),
+      processId: expect.stringMatching(/^webhook-42-/),
+    }));
   });
 
   it('skips analysis when no config is provided', async () => {
@@ -758,13 +761,15 @@ describe('handleIssueCommentEvent', () => {
     expect(result.prNumber).toBe(99);
     expect(result.issueNumber).toBe(42);
     expect(result.reason).toBe('Prompt triggered');
-    expect(runArchitect).toHaveBeenCalledWith(mockConfig, 42, {
+    expect(runArchitect).toHaveBeenCalledWith(mockConfig, 42, expect.objectContaining({
       continueContext: {
         prNumber: 99,
         branchName: 'issue-42-fix-login',
         humanFeedback: 'fix the validation for negative numbers',
       },
-    });
+      usageService: expect.any(Object),
+      processId: expect.stringMatching(/^prompt-99-/),
+    }));
   });
 
   it('ignores non-created actions (edited)', async () => {

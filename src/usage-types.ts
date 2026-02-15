@@ -10,6 +10,7 @@ export interface LLMUsageRecord {
   processId?: string;           // links to AgentProcess.id
   issueNumber?: number;
   prNumber?: number;
+  repoId?: number;              // links to repos.id (for multi-repo support)
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -33,6 +34,7 @@ export interface UsageQuery {
   model?: string;
   processId?: string;
   issueNumber?: number;
+  repoId?: number;
   since?: string;
   until?: string;
   limit?: number;

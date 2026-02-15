@@ -9,6 +9,7 @@ import { enrichSubIssueData } from './core.js';
 import { createGitHubClient, getAuthFromConfig } from './github-tools.js';
 import { runReviewSingle } from './reviewer-agent.js';
 import { chat, chatStream } from './chat-agent.js';
+import { UsageService } from './usage-service.js';
 
 /**
  * Webhook listener configuration.
@@ -229,7 +230,9 @@ export async function handleIssuesEvent(event: WebhookEvent, config?: Config): P
   }
 
   try {
-    const result = await runArchitect(config, issueNumber);
+    const usageService = new UsageService();
+    const processId = `webhook-${issueNumber}-${Date.now()}`;
+    const result = await runArchitect(config, issueNumber, { usageService, processId });
     if (result.prNumbers.length > 1) {
       console.log(
         `[webhook] Architect complete for issue #${issueNumber}` +
@@ -354,8 +357,12 @@ export async function handleIssueCommentEvent(event: WebhookEvent, config?: Conf
 
   // Fire-and-forget: run Architect with human feedback context
   try {
+    const promptUsageService = new UsageService();
+    const promptProcessId = `prompt-${prNumber}-${Date.now()}`;
     const result = await runArchitect(config, issueNumber, {
       continueContext: { prNumber, branchName, humanFeedback: instructions },
+      usageService: promptUsageService,
+      processId: promptProcessId,
     });
     console.log(
       `[webhook] Architect complete for /prompt on PR #${prNumber}` +

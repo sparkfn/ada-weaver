@@ -7,13 +7,13 @@ import type {
 } from './usage-types.js';
 
 export interface UsageRepository {
-  add(record: LLMUsageRecord): void;
-  query(filter?: UsageQuery): LLMUsageRecord[];
-  getById(id: string): LLMUsageRecord | undefined;
-  summarize(filter?: UsageQuery): UsageSummary;
-  groupBy(key: UsageGroupBy, filter?: UsageQuery): UsageAggregation[];
-  count(filter?: UsageQuery): number;
-  clear(): void;
+  add(record: LLMUsageRecord): void | Promise<void>;
+  query(filter?: UsageQuery): LLMUsageRecord[] | Promise<LLMUsageRecord[]>;
+  getById(id: string): LLMUsageRecord | undefined | Promise<LLMUsageRecord | undefined>;
+  summarize(filter?: UsageQuery): UsageSummary | Promise<UsageSummary>;
+  groupBy(key: UsageGroupBy, filter?: UsageQuery): UsageAggregation[] | Promise<UsageAggregation[]>;
+  count(filter?: UsageQuery): number | Promise<number>;
+  clear(): void | Promise<void>;
 }
 
 function matchesFilter(record: LLMUsageRecord, filter: UsageQuery): boolean {
@@ -22,6 +22,7 @@ function matchesFilter(record: LLMUsageRecord, filter: UsageQuery): boolean {
   if (filter.model && record.model !== filter.model) return false;
   if (filter.processId && record.processId !== filter.processId) return false;
   if (filter.issueNumber !== undefined && record.issueNumber !== filter.issueNumber) return false;
+  if (filter.repoId !== undefined && record.repoId !== filter.repoId) return false;
   if (filter.since && record.timestamp < filter.since) return false;
   if (filter.until && record.timestamp > filter.until) return false;
   return true;

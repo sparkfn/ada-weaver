@@ -219,8 +219,8 @@ describe('ProcessManager', () => {
       const proc = pm.startAnalysis(42);
 
       // Wait for completion
-      await vi.waitFor(() => {
-        const p = pm.getProcess(proc.id);
+      await vi.waitFor(async () => {
+        const p = await pm.getProcess(proc.id);
         expect(p?.status).toBe('completed');
       });
 
@@ -229,7 +229,7 @@ describe('ProcessManager', () => {
   });
 
   describe('listProcesses', () => {
-    it('lists all processes', () => {
+    it('lists all processes', async () => {
       vi.mocked(runArchitect).mockImplementation(() => new Promise(() => {}));
       vi.mocked(runReviewSingle).mockImplementation(() => new Promise(() => {}));
 
@@ -237,34 +237,34 @@ describe('ProcessManager', () => {
       pm.startAnalysis(2);
       pm.startReview(3);
 
-      expect(pm.listProcesses()).toHaveLength(3);
+      expect(await pm.listProcesses()).toHaveLength(3);
     });
 
-    it('filters by status', () => {
+    it('filters by status', async () => {
       vi.mocked(runArchitect).mockImplementation(() => new Promise(() => {}));
 
       const proc = pm.startAnalysis(1);
       pm.startAnalysis(2);
       pm.cancelProcess(proc.id);
 
-      expect(pm.listProcesses('running')).toHaveLength(1);
-      expect(pm.listProcesses('cancelled')).toHaveLength(1);
+      expect(await pm.listProcesses('running')).toHaveLength(1);
+      expect(await pm.listProcesses('cancelled')).toHaveLength(1);
     });
   });
 
   describe('getProcess', () => {
-    it('returns process by ID', () => {
+    it('returns process by ID', async () => {
       vi.mocked(runArchitect).mockImplementation(() => new Promise(() => {}));
 
       const proc = pm.startAnalysis(42);
-      const fetched = pm.getProcess(proc.id);
+      const fetched = await pm.getProcess(proc.id);
 
       expect(fetched).toBeDefined();
       expect(fetched!.issueNumber).toBe(42);
     });
 
-    it('returns undefined for unknown ID', () => {
-      expect(pm.getProcess('unknown')).toBeUndefined();
+    it('returns undefined for unknown ID', async () => {
+      expect(await pm.getProcess('unknown')).toBeUndefined();
     });
   });
 

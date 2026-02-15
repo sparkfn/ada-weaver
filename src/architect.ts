@@ -615,6 +615,53 @@ export function resolveAgentLlmConfig(
   };
 }
 
+// ── Usage summary formatting ─────────────────────────────────────────────────
+
+/**
+ * Format a Markdown comment summarizing LLM usage for a process run.
+ * Returns null if there are no usage records.
+ */
+export async function formatUsageSummaryComment(usageService: UsageService, processId: string): Promise<string | null> {
+  const summary = await usageService.summarize({ processId });
+  if (summary.totalRecords === 0) return null;
+
+  const agentBreakdown = await usageService.groupBy('agent', { processId });
+
+  const lines: string[] = [
+    '## 📊 Model Usage Summary',
+    '',
+    '| Metric | Value |',
+    '|--------|-------|',
+    `| Total tokens | ${summary.totalTokens.toLocaleString()} |`,
+    `| Input tokens | ${summary.totalInputTokens.toLocaleString()} |`,
+    `| Output tokens | ${summary.totalOutputTokens.toLocaleString()} |`,
+    `| Total duration | ${formatDuration(summary.totalDurationMs)} |`,
+    `| Estimated cost | $${summary.totalEstimatedCost.toFixed(4)} |`,
+    `| LLM calls | ${summary.totalRecords} |`,
+    '',
+  ];
+
+  if (agentBreakdown.length > 0) {
+    lines.push(
+      '### Per-Agent Breakdown',
+      '',
+      '| Agent | Tokens | Duration | Cost | Calls |',
+      '|-------|--------|----------|------|-------|',
+    );
+    for (const group of agentBreakdown) {
+      const s = group.summary;
+      lines.push(
+        `| ${group.key} | ${s.totalTokens.toLocaleString()} | ${formatDuration(s.totalDurationMs)} | $${s.totalEstimatedCost.toFixed(4)} | ${s.totalRecords} |`,
+      );
+    }
+    lines.push('');
+  }
+
+  lines.push('---', '*Automated usage report by Deep Agents*');
+
+  return lines.join('\n');
+}
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 /**
@@ -880,6 +927,24 @@ Skip the issuer step — go directly to the reviewer:
     }
   } catch (error) {
     console.warn(`\u{26A0}\uFE0F  Could not discover PR for issue #${issueNumber}: ${error}`);
+  }
+
+  // Post usage summary comment on the issue
+  if (options.usageService && options.processId && !options.dryRun) {
+    try {
+      const comment = await formatUsageSummaryComment(options.usageService, options.processId);
+      if (comment) {
+        await octokit.rest.issues.createComment({
+          owner,
+          repo,
+          issue_number: issueNumber,
+          body: comment,
+        });
+        console.log(`\n📊 Usage summary posted to issue #${issueNumber}`);
+      }
+    } catch (err) {
+      console.warn(`⚠️  Could not post usage summary: ${err}`);
+    }
   }
 
   return {

@@ -5,6 +5,9 @@ import { createGitHubClient, getAuthFromConfig } from './github-tools.js';
 import type { Octokit } from 'octokit';
 import { withRetry } from './utils.js';
 import { runArchitect } from './architect.js';
+import type { PollRepository } from './poll-repository.js';
+import { FilePollRepository } from './poll-repository.js';
+import { UsageService } from './usage-service.js';
 
 // ── Issue data interface ─────────────────────────────────────────────────────
 
@@ -302,10 +305,12 @@ async function fetchIssuesForPoll(
  * The Architect supervisor handles everything: issue understanding (Issuer),
  * implementation (Coder), and review (Reviewer). No separate triage phase needed.
  */
-export async function runPollCycle(config: Config, options: { noSave?: boolean; dryRun?: boolean; maxIssues?: number; maxToolCalls?: number } = {}): Promise<void> {
+export async function runPollCycle(config: Config, options: { noSave?: boolean; dryRun?: boolean; maxIssues?: number; maxToolCalls?: number; pollRepository?: PollRepository; repoId?: number } = {}): Promise<void> {
   const maxIssues = options.maxIssues ?? getMaxIssues(config);
   // Dry run implies no-save (never persist state when skipping writes)
   const skipSave = options.noSave || options.dryRun;
+  const pollRepo = options.pollRepository ?? new FilePollRepository();
+  const repoId = options.repoId ?? 0;
 
   console.log(`\u{2705} Config loaded: ${config.github.owner}/${config.github.repo}`);
   console.log(`\u{1F6E1}\uFE0F  Max issues per run: ${maxIssues}`);
@@ -320,7 +325,7 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
   console.log('');
 
   // Load polling state
-  const pollState = loadPollState();
+  const pollState = await pollRepo.load(repoId);
   const sinceDate = pollState?.lastPollTimestamp ?? null;
 
   if (sinceDate) {
@@ -343,12 +348,12 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
     console.log('\u{2705} No new issues to process.\n');
 
     if (!skipSave) {
-      savePollState({
+      await pollRepo.save(repoId, {
         lastPollTimestamp: new Date().toISOString(),
         lastPollIssueNumbers: previousIssueNumbers,
         issues: pollState?.issues ?? {},
       });
-      console.log(`\u{1F4BE} Poll state saved to ${POLL_STATE_FILE}`);
+      console.log('\u{1F4BE} Poll state saved');
     }
     return;
   }
@@ -370,7 +375,9 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
 
     console.log(`\n\u{1F3D7}\uFE0F  Processing issue #${issue.number}: ${issue.title}`);
     try {
-      const result = await runArchitect(config, issue.number, { dryRun: options.dryRun });
+      const usageService = new UsageService();
+      const processId = `poll-${issue.number}-${Date.now()}`;
+      const result = await runArchitect(config, issue.number, { dryRun: options.dryRun, usageService, processId });
       processedNumbers.push(issue.number);
 
       // Record actions from the Architect result
@@ -397,12 +404,12 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
 
   // Save poll state
   if (!skipSave) {
-    savePollState({
+    await pollRepo.save(repoId, {
       lastPollTimestamp: new Date().toISOString(),
       lastPollIssueNumbers: processedNumbers,
       issues: issueActions,
     });
-    console.log(`\n\u{1F4BE} Poll state saved to ${POLL_STATE_FILE}`);
+    console.log('\n\u{1F4BE} Poll state saved');
   } else {
     console.log(`\n\u{1F9EA} ${options.dryRun ? 'Dry run' : 'No-save'} mode -- poll state NOT saved`);
   }
@@ -477,10 +484,11 @@ export async function findAllPrsForIssue(
 /**
  * Show current polling status (last run time, processed issues).
  */
-export function showStatus(config: Config): void {
+export async function showStatus(config: Config, pollRepository?: PollRepository): Promise<void> {
+  const pollRepo = pollRepository ?? new FilePollRepository();
   console.log(`\u{1F4CA} Status for ${config.github.owner}/${config.github.repo}\n`);
 
-  const pollState = loadPollState();
+  const pollState = await pollRepo.load(0);
 
   if (!pollState) {
     console.log('No poll state found. Run `deepagents poll` to start.');
@@ -529,11 +537,12 @@ export interface RetractResult {
  * Order matters: close PR first (it references the branch), then delete branch, then delete comment.
  * Partial retraction is supported -- if one step fails, the others still attempt.
  */
-export async function retractIssue(config: Config, issueNumber: number): Promise<RetractResult> {
+export async function retractIssue(config: Config, issueNumber: number, pollRepository?: PollRepository): Promise<RetractResult> {
+  const pollRepo = pollRepository ?? new FilePollRepository();
   const { owner, repo } = config.github;
   const octokit = createGitHubClient(getAuthFromConfig(config.github));
 
-  const pollState = loadPollState();
+  const pollState = await pollRepo.load(0);
   if (!pollState) {
     throw new Error('No poll state found. Nothing to retract.');
   }
@@ -608,7 +617,7 @@ export async function retractIssue(config: Config, issueNumber: number): Promise
   pollState.lastPollIssueNumbers = pollState.lastPollIssueNumbers.filter(
     (n) => n !== issueNumber,
   );
-  savePollState(pollState);
+  await pollRepo.save(0, pollState);
   console.log(`  Poll state updated (issue #${issueNumber} cleared)`);
 
   return result;

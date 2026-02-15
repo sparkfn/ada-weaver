@@ -87,52 +87,52 @@ describe('UsageService', () => {
   });
 
   describe('delegation to repository', () => {
-    it('delegates query()', () => {
+    it('delegates query()', async () => {
       service.record(makeInput({ agent: 'architect' }));
       service.record(makeInput({ agent: 'coder' }));
-      const results = service.query({ agent: 'architect' });
+      const results = await service.query({ agent: 'architect' });
       expect(results).toHaveLength(1);
     });
 
-    it('delegates getById()', () => {
+    it('delegates getById()', async () => {
       const record = service.record(makeInput());
-      expect(service.getById(record.id)).toBeDefined();
-      expect(service.getById('nonexistent')).toBeUndefined();
+      expect(await service.getById(record.id)).toBeDefined();
+      expect(await service.getById('nonexistent')).toBeUndefined();
     });
 
-    it('delegates summarize()', () => {
+    it('delegates summarize()', async () => {
       service.record(makeInput({ inputTokens: 100, outputTokens: 50 }));
       service.record(makeInput({ inputTokens: 200, outputTokens: 100 }));
-      const summary = service.summarize();
+      const summary = await service.summarize();
       expect(summary.totalRecords).toBe(2);
       expect(summary.totalInputTokens).toBe(300);
     });
 
-    it('delegates groupBy()', () => {
+    it('delegates groupBy()', async () => {
       service.record(makeInput({ agent: 'architect' }));
       service.record(makeInput({ agent: 'coder' }));
-      const groups = service.groupBy('agent');
+      const groups = await service.groupBy('agent');
       expect(groups).toHaveLength(2);
     });
 
-    it('delegates count()', () => {
+    it('delegates count()', async () => {
       service.record(makeInput());
       service.record(makeInput());
-      expect(service.count()).toBe(2);
+      expect(await service.count()).toBe(2);
     });
 
-    it('delegates clear()', () => {
+    it('delegates clear()', async () => {
       service.record(makeInput());
       service.clear();
-      expect(service.count()).toBe(0);
+      expect(await service.count()).toBe(0);
     });
   });
 
   describe('default repository', () => {
-    it('uses InMemoryUsageRepository when none provided', () => {
+    it('uses InMemoryUsageRepository when none provided', async () => {
       const defaultService = new UsageService();
       defaultService.record(makeInput());
-      expect(defaultService.count()).toBe(1);
+      expect(await defaultService.count()).toBe(1);
     });
   });
 });

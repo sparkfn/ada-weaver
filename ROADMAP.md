@@ -174,6 +174,7 @@ Incremental improvements after the v1.0.0 milestone. These are not new phases �
 | v1.5.0 | Parallel subagent support — Architect can spawn concurrent coders/reviewers for independent tasks | ✓ v1.5.0 |
 | v1.6.0 | LLM usage metrics, `/prompt` human-in-the-loop feedback, unified `serve` command, `test-access` CLI | ✓ v1.6.0 |
 | v1.7.0 | PostgreSQL persistence & multi-repo schema — poll state, usage, processes survive restarts | ✓ v1.7.0 |
+| v1.8.0 | Shared file cache — in-memory cache across subagents to reduce redundant GitHub API reads | ✓ v1.8.0 |
 
 ---
 

@@ -9,6 +9,29 @@
 
 ---
 
+## v1.8.0 — 2026-02-15
+
+**Shared File Cache for the Architect Pipeline.** Adds an in-memory file cache shared across all subagents within a single `runArchitect()` call. File contents, directory listings, and PR diffs are cached so that when multiple subagents (issuer, coder, reviewer) read the same files, only the first call hits the GitHub API. Write operations automatically invalidate affected cache entries. Expected to cut input tokens by 30-40% on typical runs.
+
+### Added
+- **`src/tool-cache.ts`** — new module with `ToolCache` class, `wrapWithCache()` wrapper, `wrapWriteWithInvalidation()` wrapper, and cache key extractors (`readFileKey`, `listFilesKey`, `prDiffKey`)
+  - `ToolCache`: `Map<string, string>`-based cache with hit/miss/invalidation stats tracking, prefix and prefix+suffix invalidation
+  - `wrapWithCache()`: wraps a LangChain tool to check cache before invoking, following the existing `wrapWithCircuitBreaker`/`wrapWithLogging` pattern
+  - `wrapWriteWithInvalidation()`: wraps `create_or_update_file` to invalidate stale file, tree, and diff entries after writes
+- **Cache stats** logged at the end of every `runArchitect()` run (hits, misses, hit rate, invalidations, entries)
+- **`cacheStats`** field on `ArchitectResult` — includes hits, misses, invalidations, size, hitRate
+- 30 new tests: `tests/tool-cache.test.ts` (24 tests for ToolCache, wrapWithCache, wrapWriteWithInvalidation, cache+circuit breaker integration) + `tests/architect.test.ts` (6 tests for backward compat and cache flow) — **511 tests total**
+
+### Changed
+- `createArchitect()` creates a shared `ToolCache` instance and passes it to all subagent factories; returns `{ agent, cache }` instead of just `agent`
+- `createIssuerSubagent()` accepts optional `cache` param — wraps `list_repo_files` and `read_repo_file`
+- `createCoderSubagent()` accepts optional `cache` param — wraps reads + write invalidation on `create_or_update_file`
+- `createReviewerSubagent()` accepts optional `cache` param — wraps `get_pr_diff`, `list_repo_files`, `read_repo_file`
+- `createReviewerAgent()` in `reviewer-agent.ts` accepts optional `cache` param; cache is applied BEFORE circuit breaker so cache hits don't count toward the tool call limit
+- Architect's own read-only tools (`list_repo_files`, `read_repo_file`) are also wrapped with the shared cache
+
+---
+
 ## v1.7.0 — 2026-02-15
 
 **PostgreSQL Persistence & Multi-Repo Schema.** Adds PostgreSQL as an optional persistence layer, replacing file-based poll state (`last_poll.json`) and in-memory storage for LLM usage metrics and agent process history. Poll state, issue actions, agent processes, and usage records all survive restarts when a database is configured. The schema supports multiple repositories via a `repos` table. Without `DATABASE_URL`, the system falls back to file/in-memory storage (existing behavior unchanged).

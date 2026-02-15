@@ -533,7 +533,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-481 tests across 14 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+511 tests across 15 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 
@@ -569,6 +569,7 @@ learning-deep-agents/
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
     github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR, commit, review)
     reviewer-agent.ts -- Standalone PR reviewer agent (diff reader, source context, review submitter)
+    tool-cache.ts     -- Shared file cache (ToolCache, wrapWithCache, wrapWriteWithInvalidation)
     logger.ts         -- Structured logging (tool calls, agent events, colored diff output)
     utils.ts          -- Retry with exponential backoff for API calls
     chat-agent.ts     -- Chat agent for human-agent interaction (read-only tools + checkpointer)
@@ -594,6 +595,7 @@ learning-deep-agents/
         001_initial_schema.sql -- Full schema: repos, poll_state, issue_actions, agent_processes, llm_usage
   tests/
     architect.test.ts -- Architect supervisor, subagent factories, extractTaskInput, system prompt tests
+    tool-cache.test.ts -- ToolCache, wrapWithCache, wrapWriteWithInvalidation, cache+circuit breaker integration
     core.test.ts      -- Unit tests for core logic, state, graceful shutdown
     github-tools.test.ts -- Idempotency and tool tests (mocked Octokit)
     model.test.ts     -- Provider routing tests (mocked LLM constructors)

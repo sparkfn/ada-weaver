@@ -27,6 +27,7 @@ import {
 } from './github-tools.js';
 import { formatDuration, logAgentEvent, logAgentDetail, logDiff } from './logger.js';
 import { buildReviewerSystemPrompt } from './reviewer-agent.js';
+import { ToolCache, wrapWithCache, wrapWriteWithInvalidation, readFileKey, listFilesKey, prDiffKey } from './tool-cache.js';
 import { findPrForIssue, findAllPrsForIssue } from './core.js';
 import type { Octokit } from 'octokit';
 import type { ProgressUpdate } from './process-manager.js';
@@ -40,6 +41,7 @@ export interface ArchitectResult {
   prNumber: number | null;
   prNumbers: number[];
   outcome: string;
+  cacheStats?: { hits: number; misses: number; invalidations: number; size: number; hitRate: string };
 }
 
 interface SubagentRun {
@@ -231,14 +233,22 @@ export function createIssuerSubagent(
   owner: string,
   repo: string,
   octokit: Octokit,
-  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel> } = {},
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; cache?: ToolCache } = {},
 ): SubAgent {
   const dryRun = opts.dryRun ?? false;
 
+  let listTool = createListRepoFilesTool(owner, repo, octokit);
+  let readTool = createReadRepoFileTool(owner, repo, octokit);
+
+  if (opts.cache) {
+    listTool = wrapWithCache(listTool, opts.cache, { extractKey: listFilesKey });
+    readTool = wrapWithCache(readTool, opts.cache, { extractKey: readFileKey });
+  }
+
   const tools = [
     createGitHubIssuesTool(owner, repo, octokit),
-    createListRepoFilesTool(owner, repo, octokit),
-    createReadRepoFileTool(owner, repo, octokit),
+    listTool,
+    readTool,
     createFetchSubIssuesTool(owner, repo, octokit),
     createGetParentIssueTool(owner, repo, octokit),
     dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
@@ -319,16 +329,26 @@ export function createCoderSubagent(
   owner: string,
   repo: string,
   octokit: Octokit,
-  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel> },
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; cache?: ToolCache },
 ): SubAgent {
   const dryRun = opts.dryRun ?? false;
 
+  let listTool = createListRepoFilesTool(owner, repo, octokit);
+  let readTool = createReadRepoFileTool(owner, repo, octokit);
+  let writeTool = dryRun ? createDryRunCreateOrUpdateFileTool() : createOrUpdateFileTool(owner, repo, octokit);
+
+  if (opts.cache) {
+    listTool = wrapWithCache(listTool, opts.cache, { extractKey: listFilesKey });
+    readTool = wrapWithCache(readTool, opts.cache, { extractKey: readFileKey });
+    writeTool = wrapWriteWithInvalidation(writeTool, opts.cache);
+  }
+
   const tools = [
-    createListRepoFilesTool(owner, repo, octokit),
-    createReadRepoFileTool(owner, repo, octokit),
+    listTool,
+    readTool,
     dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
     dryRun ? createDryRunBranchTool() : createBranchTool(owner, repo, octokit),
-    dryRun ? createDryRunCreateOrUpdateFileTool() : createOrUpdateFileTool(owner, repo, octokit),
+    writeTool,
     dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit),
     dryRun ? createDryRunCreateSubIssueTool() : createCreateSubIssueTool(owner, repo, octokit),
   ];
@@ -440,11 +460,22 @@ export function createReviewerSubagent(
   repo: string,
   octokit: Octokit,
   model?: ReturnType<typeof createModel>,
+  cache?: ToolCache,
 ): SubAgent {
+  let diffTool = createGetPrDiffTool(octokit, owner, repo);
+  let listTool = createListRepoFilesTool(owner, repo, octokit);
+  let readTool = createReadRepoFileTool(owner, repo, octokit);
+
+  if (cache) {
+    diffTool = wrapWithCache(diffTool, cache, { extractKey: prDiffKey });
+    listTool = wrapWithCache(listTool, cache, { extractKey: listFilesKey });
+    readTool = wrapWithCache(readTool, cache, { extractKey: readFileKey });
+  }
+
   const tools = [
-    createGetPrDiffTool(octokit, owner, repo),
-    createListRepoFilesTool(owner, repo, octokit),
-    createReadRepoFileTool(owner, repo, octokit),
+    diffTool,
+    listTool,
+    readTool,
     createSubmitPrReviewTool(octokit, owner, repo),
   ];
 
@@ -556,18 +587,26 @@ export function createArchitect(
     ? createModel({ ...config, llm: config.reviewerLlm })
     : undefined;
 
+  // Shared file cache across all subagents
+  const cache = new ToolCache();
+
   // Build subagents
   const subagents = [
-    createIssuerSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: issuerModel }),
-    createCoderSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: coderModel }),
-    createReviewerSubagent(owner, repo, octokit, reviewerModel),
+    createIssuerSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: issuerModel, cache }),
+    createCoderSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: coderModel, cache }),
+    createReviewerSubagent(owner, repo, octokit, reviewerModel, cache),
   ];
 
-  // Architect's own read-only tools for verification
+  // Architect's own read-only tools for verification (also cached)
+  let architectListTool = createListRepoFilesTool(owner, repo, octokit);
+  let architectReadTool = createReadRepoFileTool(owner, repo, octokit);
+  architectListTool = wrapWithCache(architectListTool, cache, { extractKey: listFilesKey });
+  architectReadTool = wrapWithCache(architectReadTool, cache, { extractKey: readFileKey });
+
   const architectTools = [
     createGitHubIssuesTool(owner, repo, octokit),
-    createListRepoFilesTool(owner, repo, octokit),
-    createReadRepoFileTool(owner, repo, octokit),
+    architectListTool,
+    architectReadTool,
     options.dryRun ? createDryRunCheckCiStatusTool() : createCheckCiStatusTool(owner, repo, octokit),
   ];
 
@@ -581,7 +620,7 @@ export function createArchitect(
     systemPrompt,
   });
 
-  return agent;
+  return { agent, cache };
 }
 
 // ── LLM config resolver ──────────────────────────────────────────────────────
@@ -712,7 +751,7 @@ export async function runArchitect(
   }
   console.log('');
 
-  const architect = createArchitect(config, { dryRun: options.dryRun, maxIterations });
+  const { agent: architect, cache } = createArchitect(config, { dryRun: options.dryRun, maxIterations });
 
   // Octokit client for diff fetching after coder completes
   const { owner, repo } = config.github;
@@ -910,6 +949,12 @@ Skip the issuer step — go directly to the reviewer:
   console.log('='.repeat(60));
   console.log('\n\u{2705} Architect completed!\n');
 
+  // Log cache stats
+  const stats = cache.getStats();
+  const total = stats.hits + stats.misses;
+  const hitRate = total > 0 ? ((stats.hits / total) * 100).toFixed(1) : '0.0';
+  console.log(`\u{1F4BE} Cache stats: ${stats.hits} hits, ${stats.misses} misses (${hitRate}% hit rate), ${stats.invalidations} invalidations, ${stats.size} entries`);
+
   const outcome = lastResponse || 'No response captured from Architect.';
 
   console.log('\u{1F4DD} Architect Summary:');
@@ -952,5 +997,6 @@ Skip the issuer step — go directly to the reviewer:
     prNumber,
     prNumbers,
     outcome,
+    cacheStats: { hits: stats.hits, misses: stats.misses, invalidations: stats.invalidations, size: stats.size, hitRate: `${hitRate}%` },
   };
 }

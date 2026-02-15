@@ -11,6 +11,7 @@ import {
   formatUsageSummaryComment,
 } from '../src/architect.js';
 import { UsageService } from '../src/usage-service.js';
+import { ToolCache } from '../src/tool-cache.js';
 
 // ── buildArchitectSystemPrompt ──────────────────────────────────────────────
 
@@ -589,5 +590,54 @@ describe('formatUsageSummaryComment', () => {
 
     const comment = (await formatUsageSummaryComment(service, 'proc-3'))!;
     expect(comment).toContain('Automated usage report by Deep Agents');
+  });
+});
+
+// ── Cache backward compatibility ─────────────────────────────────────────────
+
+describe('subagent factories — backward compat (no cache)', () => {
+  const mockOctokit = {} as any;
+
+  it('createIssuerSubagent works without cache', () => {
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit);
+    expect(subagent.name).toBe('issuer');
+    expect(subagent.tools).toHaveLength(6);
+  });
+
+  it('createCoderSubagent works without cache', () => {
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, {});
+    expect(subagent.name).toBe('coder');
+    expect(subagent.tools).toHaveLength(7);
+  });
+
+  it('createReviewerSubagent works without cache', () => {
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit);
+    expect(subagent.name).toBe('reviewer');
+    expect(subagent.tools).toHaveLength(4);
+  });
+});
+
+describe('subagent factories — cache flows through', () => {
+  const mockOctokit = {} as any;
+
+  it('createIssuerSubagent accepts cache and still has 6 tools', () => {
+    const cache = new ToolCache();
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { cache });
+    expect(subagent.name).toBe('issuer');
+    expect(subagent.tools).toHaveLength(6);
+  });
+
+  it('createCoderSubagent accepts cache and still has 7 tools', () => {
+    const cache = new ToolCache();
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { cache });
+    expect(subagent.name).toBe('coder');
+    expect(subagent.tools).toHaveLength(7);
+  });
+
+  it('createReviewerSubagent accepts cache and still has 4 tools', () => {
+    const cache = new ToolCache();
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, cache);
+    expect(subagent.name).toBe('reviewer');
+    expect(subagent.tools).toHaveLength(4);
   });
 });

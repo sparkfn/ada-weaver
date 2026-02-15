@@ -11,6 +11,7 @@ import {
   wrapWithCircuitBreaker,
 } from './github-tools.js';
 import { wrapWithLogging } from './logger.js';
+import { ToolCache, wrapWithCache, readFileKey, prDiffKey } from './tool-cache.js';
 import type { UsageService } from './usage-service.js';
 import type { LLMProvider } from './usage-types.js';
 
@@ -151,6 +152,7 @@ export function createReviewerAgent(
     maxToolCalls?: number;
     iterationContext?: { iteration: number; previousFeedback: string[] };
     iterationTag?: number;
+    cache?: ToolCache;
   } = {},
 ) {
   // Use reviewerLlm if configured, otherwise fall back to main llm
@@ -166,6 +168,12 @@ export function createReviewerAgent(
   let diffTool = createGetPrDiffTool(octokit, owner, repo);
   let readFileTool = createReadRepoFileTool(owner, repo, octokit);
   let reviewTool = createSubmitPrReviewTool(octokit, owner, repo, { iterationTag: options.iterationTag });
+
+  // Cache layer (innermost — cache hit skips API AND circuit breaker)
+  if (options.cache) {
+    diffTool = wrapWithCache(diffTool, options.cache, { extractKey: prDiffKey });
+    readFileTool = wrapWithCache(readFileTool, options.cache, { extractKey: readFileKey });
+  }
 
   // Circuit breaker
   const maxToolCalls = options.maxToolCalls ?? REVIEWER_MAX_TOOL_CALLS;

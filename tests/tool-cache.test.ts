@@ -121,6 +121,7 @@ describe('ToolCache', () => {
 });
 
 // ── Key extractors ───────────────────────────────────────────────────────────
+// Key extractors receive already-parsed args from the tool's func (after zod).
 
 describe('key extractors', () => {
   it('readFileKey uses path and branch', () => {
@@ -224,7 +225,6 @@ describe('wrapWriteWithInvalidation', () => {
     expect(handler).toHaveBeenCalledTimes(1);
 
     // file entry for this path+branch should be gone
-    // (get increments miss counter, so use getStats().size to check)
     expect(cache.get('file:src/app.ts:feature')).toBeUndefined();
 
     // tree entries for this branch should be gone
@@ -259,35 +259,34 @@ describe('wrapWriteWithInvalidation', () => {
 });
 
 // ── Integration: cache hit does NOT increment circuit breaker ────────────────
+// Cache wraps func (innermost), circuit breaker wraps invoke (outermost).
+// A cache hit still goes through invoke → circuit breaker increments → but
+// the API handler inside func is never called.
 
 describe('cache + circuit breaker integration', () => {
-  it('cache hit bypasses circuit breaker counter', async () => {
+  it('cache hit skips the handler but circuit breaker still counts', async () => {
     const handler = vi.fn().mockResolvedValue('content');
     const mockTool = createMockTool('read_repo_file', handler);
     const cache = new ToolCache();
-    const counter = new ToolCallCounter(2); // only 2 calls allowed
+    const counter = new ToolCallCounter(5);
 
-    // Apply cache BEFORE circuit breaker (innermost → outermost)
+    // Apply cache on func, circuit breaker on invoke
     wrapWithCache(mockTool, cache, { extractKey: (input) => `file:${input.path}:main` });
     wrapWithCircuitBreaker(mockTool, counter);
 
     // Call 1: miss → hits API → counter = 1
     await mockTool.invoke({ path: 'a.ts', branch: 'main' });
     expect(counter.getCount()).toBe(1);
+    expect(handler).toHaveBeenCalledTimes(1);
 
-    // Call 2: hit → cache returns → counter = 2 (circuit breaker still increments)
+    // Call 2: hit → cache returns from func → counter = 2
     // But the handler should NOT be called again
     await mockTool.invoke({ path: 'a.ts', branch: 'main' });
+    expect(counter.getCount()).toBe(2);
     expect(handler).toHaveBeenCalledTimes(1); // handler only called once
-
-    // Call 3: different file, miss → counter = 3 → should trip breaker
-    // But wait — the counter is at 2, and limit is 2, so call 3 would be count 3 > 2 → error
-    // Actually the circuit breaker trips AFTER incrementing, so count 3 > limit 2 → error
-    // Let's verify the handler was only called once (the cache hit prevented the API call)
-    expect(handler).toHaveBeenCalledTimes(1);
   });
 
-  it('cache hit before circuit breaker means API is never called', async () => {
+  it('pre-populated cache hit means API handler is never called', async () => {
     const handler = vi.fn().mockResolvedValue('data');
     const mockTool = createMockTool('read_repo_file', handler);
     const cache = new ToolCache();
@@ -295,7 +294,6 @@ describe('cache + circuit breaker integration', () => {
     // Pre-populate cache
     cache.set('file:pre.ts:main', 'cached-data');
 
-    // Correct wrapping order: cache (inner) → circuit breaker (outer)
     wrapWithCache(mockTool, cache, { extractKey: (input) => `file:${input.path}:main` });
     const counter = new ToolCallCounter(5);
     wrapWithCircuitBreaker(mockTool, counter);
@@ -303,7 +301,6 @@ describe('cache + circuit breaker integration', () => {
     const result = await mockTool.invoke({ path: 'pre.ts', branch: 'main' });
     expect(result).toBe('cached-data');
     expect(handler).not.toHaveBeenCalled();
-    // Circuit breaker DID increment (it's the outer wrapper), but the API was never called
-    expect(counter.getCount()).toBe(1);
+    expect(counter.getCount()).toBe(1); // circuit breaker did count
   });
 });

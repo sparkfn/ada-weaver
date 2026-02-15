@@ -82,20 +82,26 @@ export class ToolCache {
 /**
  * Wrap a LangChain tool with cache-on-invoke behavior.
  *
- * On invoke: check cache by key → return cached value on hit (skip API call)
- * → on miss, call original tool, store result in cache, return result.
+ * Wraps the tool's internal `func` property (the user-provided handler) rather
+ * than `invoke`. This is critical because `invoke` manages LangChain's Runnable
+ * callback lifecycle (handleChainStart/handleChainEnd, ToolCall id propagation).
+ * Bypassing `invoke` on a cache hit corrupts LangGraph's message graph.
  *
- * Follows the same wrapper pattern as wrapWithCircuitBreaker / wrapWithLogging:
- * mutates wrappedTool.invoke in place and returns the same tool reference.
+ * By wrapping `func`, the full Runnable infrastructure still runs on every call.
+ * On a cache hit, only the actual API call inside `func` is skipped.
+ *
+ * The `func` receives already-parsed args (after zod schema processing), so
+ * the `extractKey` callback receives clean args like `{ path, branch }`.
  */
 export function wrapWithCache<T extends ReturnType<typeof tool>>(
   wrappedTool: T,
   cache: ToolCache,
   opts: { extractKey: (input: any) => string },
 ): T {
-  const originalInvoke = wrappedTool.invoke.bind(wrappedTool);
+  const toolAny = wrappedTool as any;
+  const originalFunc = toolAny.func;
 
-  wrappedTool.invoke = async (input: any, options?: any) => {
+  toolAny.func = async (input: any, ...rest: any[]) => {
     const key = opts.extractKey(input);
     const cached = cache.get(key);
     if (cached !== undefined) {
@@ -103,7 +109,7 @@ export function wrapWithCache<T extends ReturnType<typeof tool>>(
       return cached;
     }
 
-    const result = await originalInvoke(input, options);
+    const result = await originalFunc(input, ...rest);
     cache.set(key, result);
     return result;
   };
@@ -116,6 +122,8 @@ export function wrapWithCache<T extends ReturnType<typeof tool>>(
 /**
  * Wrap the coder's `create_or_update_file` tool with cache invalidation.
  *
+ * Wraps `func` (not `invoke`) for the same reason as wrapWithCache.
+ *
  * After a successful write to (path, branch):
  * - Invalidate `file:${path}:${branch}` (stale file content)
  * - Invalidate all `tree:*:${branch}` entries (file list changed)
@@ -125,12 +133,13 @@ export function wrapWriteWithInvalidation<T extends ReturnType<typeof tool>>(
   wrappedTool: T,
   cache: ToolCache,
 ): T {
-  const originalInvoke = wrappedTool.invoke.bind(wrappedTool);
+  const toolAny = wrappedTool as any;
+  const originalFunc = toolAny.func;
 
-  wrappedTool.invoke = async (input: any, options?: any) => {
-    const result = await originalInvoke(input, options);
+  toolAny.func = async (input: any, ...rest: any[]) => {
+    const result = await originalFunc(input, ...rest);
 
-    // Invalidate on successful write
+    // Invalidate on successful write — input is already-parsed args
     const path = input?.path;
     const branch = input?.branch;
     if (path && branch) {
@@ -146,6 +155,9 @@ export function wrapWriteWithInvalidation<T extends ReturnType<typeof tool>>(
 }
 
 // ── Cache key extractors ─────────────────────────────────────────────────────
+
+// These receive already-parsed args from the tool's func (after zod processing).
+// No need to handle ToolCall wrapping — that's resolved by invoke() before func().
 
 /** Cache key for read_repo_file: `file:${path}:${branch}` */
 export function readFileKey(input: any): string {

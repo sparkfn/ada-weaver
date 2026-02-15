@@ -38,7 +38,7 @@ export interface ProcessEvent {
 
 export interface ProgressUpdate {
   phase: string;
-  action: 'started' | 'completed';
+  action: 'started' | 'completed' | 'reasoning';
   iteration?: number;
   maxIterations?: number;
   detail?: string;

@@ -9,6 +9,7 @@ import { runArchitect } from './architect.js';
 import { startWebhookServer, startDialogServer } from './listener.js';
 import { runReviewSingle } from './reviewer-agent.js';
 import { startDashboardServer, startUnifiedServer } from './dashboard.js';
+import { createGitHubClient, getAuthFromConfig } from './github-tools.js';
 
 // ── Signal handlers for graceful shutdown ────────────────────────────────────
 
@@ -48,6 +49,7 @@ const USAGE = `
 Usage: deepagents <command> [options]
 
 Commands:
+  test-access       Quick read/write test against GitHub (posts + deletes a comment)
   serve             Start unified server (dashboard + webhook + dialog on one port)
   poll              Run a poll cycle: fetch, analyze, comment, branch, PR
   analyze           Analyze a single issue (Architect: understand, implement, review)
@@ -60,6 +62,11 @@ Commands:
   kill              Force kill all running deepagents processes
   status            Show current polling state
   help              Show this help message
+
+Options for 'test-access':
+  --issue N         Issue number to test against
+  --pr N            PR number to test against
+                    (at least one of --issue or --pr is required; both can be used together)
 
 Options for 'serve':
   --port N          Port for the unified server (default: PORT env var or 3000)
@@ -94,6 +101,9 @@ Environment variables:
   PORT=3000         Default port for 'serve' command
 
 Examples:
+  deepagents test-access --issue 1
+  deepagents test-access --pr 10
+  deepagents test-access --issue 1 --pr 10
   deepagents serve
   deepagents serve --port 8080
   deepagents poll
@@ -215,6 +225,129 @@ async function main() {
   const config = loadConfig();
 
   switch (command) {
+    case 'test-access': {
+      const taIssueStr = flags['issue'];
+      const taPrStr = flags['pr'];
+
+      if (!taIssueStr && !taPrStr) {
+        console.error('--issue N or --pr N is required for the test-access command');
+        console.log('\nUsage: deepagents test-access --issue 1');
+        console.log('       deepagents test-access --pr 10');
+        console.log('       deepagents test-access --issue 1 --pr 10');
+        process.exit(1);
+      }
+
+      const { owner, repo } = config.github;
+      const octokit = createGitHubClient(getAuthFromConfig(config.github));
+
+      console.log(`\u{1F50D} Testing GitHub access for ${owner}/${repo}...\n`);
+
+      // ── Issue access ──
+      if (taIssueStr && typeof taIssueStr === 'string') {
+        const taIssueNumber = parseInt(taIssueStr, 10);
+        if (isNaN(taIssueNumber) || taIssueNumber < 1) {
+          console.error('--issue must be a positive integer');
+          process.exit(1);
+        }
+
+        // Read
+        try {
+          const { data: issue } = await octokit.rest.issues.get({ owner, repo, issue_number: taIssueNumber });
+          console.log(`\u{2705} READ  issue — #${taIssueNumber}: "${issue.title}" (${issue.state})`);
+        } catch (err: any) {
+          console.error(`\u{274C} READ  issue — Failed to fetch issue #${taIssueNumber}: ${err.message}`);
+          process.exit(1);
+        }
+
+        // Write + delete
+        let commentId: number | undefined;
+        try {
+          const { data: comment } = await octokit.rest.issues.createComment({
+            owner, repo,
+            issue_number: taIssueNumber,
+            body: '\u{1F916} **Deep Agents access test** — this comment will be deleted immediately.',
+          });
+          commentId = comment.id;
+          console.log(`\u{2705} WRITE issue — Posted test comment (id: ${commentId})`);
+        } catch (err: any) {
+          console.error(`\u{274C} WRITE issue — Failed to post comment on issue #${taIssueNumber}: ${err.message}`);
+          process.exit(1);
+        }
+
+        try {
+          await octokit.rest.issues.deleteComment({ owner, repo, comment_id: commentId! });
+          console.log(`\u{2705} DELETE issue — Removed test comment (id: ${commentId})`);
+        } catch (err: any) {
+          console.error(`\u{26A0}\uFE0F  DELETE issue — Failed to delete comment ${commentId}: ${err.message}`);
+        }
+      }
+
+      // ── PR access ──
+      if (taPrStr && typeof taPrStr === 'string') {
+        const taPrNumber = parseInt(taPrStr, 10);
+        if (isNaN(taPrNumber) || taPrNumber < 1) {
+          console.error('--pr must be a positive integer');
+          process.exit(1);
+        }
+
+        // Read PR
+        try {
+          const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: taPrNumber });
+          console.log(`\u{2705} READ  PR — #${taPrNumber}: "${pr.title}" (${pr.state})`);
+        } catch (err: any) {
+          console.error(`\u{274C} READ  PR — Failed to fetch PR #${taPrNumber}: ${err.message}`);
+          process.exit(1);
+        }
+
+        // Read diff
+        try {
+          const { data } = await octokit.rest.pulls.get({
+            owner, repo, pull_number: taPrNumber,
+            mediaType: { format: 'diff' },
+          });
+          const diff = data as unknown as string;
+          const lineCount = diff.split('\n').length;
+          console.log(`\u{2705} READ  diff — ${lineCount} lines`);
+        } catch (err: any) {
+          console.error(`\u{274C} READ  diff — Failed to fetch diff for PR #${taPrNumber}: ${err.message}`);
+        }
+
+        // Write review + delete
+        let reviewId: number | undefined;
+        try {
+          const { data: review } = await octokit.rest.pulls.createReview({
+            owner, repo, pull_number: taPrNumber,
+            event: 'COMMENT',
+            body: '\u{1F916} **Deep Agents access test** — this review will be deleted immediately.',
+          });
+          reviewId = review.id;
+          console.log(`\u{2705} WRITE PR — Posted test review (id: ${reviewId})`);
+        } catch (err: any) {
+          console.error(`\u{274C} WRITE PR — Failed to post review on PR #${taPrNumber}: ${err.message}`);
+          process.exit(1);
+        }
+
+        try {
+          await octokit.rest.pulls.deleteReview({ owner, repo, pull_number: taPrNumber, review_id: reviewId! });
+          console.log(`\u{2705} DELETE PR — Removed test review (id: ${reviewId})`);
+        } catch (err: any) {
+          // Submitted reviews can't be deleted — try dismissing instead
+          try {
+            await octokit.rest.pulls.dismissReview({
+              owner, repo, pull_number: taPrNumber, review_id: reviewId!,
+              message: 'Access test cleanup',
+            });
+            console.log(`\u{2705} DELETE PR — Dismissed test review (id: ${reviewId})`);
+          } catch {
+            console.error(`\u{26A0}\uFE0F  DELETE PR — Could not remove review ${reviewId}: ${err.message}`);
+          }
+        }
+      }
+
+      console.log('\n\u{1F389} All access checks passed!');
+      break;
+    }
+
     case 'poll': {
       const dryRun = flags['dry-run'] === true;
       const noSave = flags['no-save'] === true;

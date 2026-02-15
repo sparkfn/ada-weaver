@@ -6,6 +6,8 @@ import {
   createReviewerSubagent,
   getMaxIterations,
   extractTaskInput,
+  extractTextContent,
+  extractSubagentResponse,
 } from '../src/architect.js';
 
 // ── buildArchitectSystemPrompt ──────────────────────────────────────────────
@@ -79,9 +81,14 @@ describe('createIssuerSubagent', () => {
     expect(subagent.name).toBe('issuer');
   });
 
-  it('has 5 read-only tools', () => {
+  it('has 6 tools (5 read + comment_on_issue)', () => {
     const subagent = createIssuerSubagent('o', 'r', mockOctokit);
-    expect(subagent.tools).toHaveLength(5);
+    expect(subagent.tools).toHaveLength(6);
+  });
+
+  it('has 6 tools in dry-run mode', () => {
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { dryRun: true });
+    expect(subagent.tools).toHaveLength(6);
   });
 
   it('system prompt contains owner/repo', () => {
@@ -102,13 +109,20 @@ describe('createIssuerSubagent', () => {
 
   it('includes model when provided', () => {
     const mockModel = { invoke: vi.fn() } as any;
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit, mockModel);
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { model: mockModel });
     expect(subagent.model).toBe(mockModel);
   });
 
-  it('system prompt mentions READ-ONLY constraints', () => {
+  it('system prompt mentions comment_on_issue', () => {
     const subagent = createIssuerSubagent('o', 'r', mockOctokit);
-    expect(subagent.systemPrompt).toContain('READ-ONLY');
+    expect(subagent.systemPrompt).toContain('comment_on_issue');
+  });
+
+  it('system prompt includes issue comment format template', () => {
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit);
+    expect(subagent.systemPrompt).toContain('Issue Analysis');
+    expect(subagent.systemPrompt).toContain('Recommended Approach');
+    expect(subagent.systemPrompt).toContain('Automated analysis by Deep Agents');
   });
 });
 
@@ -252,22 +266,27 @@ describe('getMaxIterations', () => {
 describe('extractTaskInput', () => {
   it('extracts from direct object at data.input', () => {
     const result = extractTaskInput({ input: { subagent_type: 'coder', description: 'fix it' } });
-    expect(result).toEqual({ subagentType: 'coder', description: 'fix it' });
+    expect(result).toEqual({ subagentType: 'coder', description: 'fix it', prompt: '' });
+  });
+
+  it('extracts from direct object with prompt', () => {
+    const result = extractTaskInput({ input: { subagent_type: 'coder', description: 'fix it', prompt: 'Modify src/app.ts to add validation' } });
+    expect(result).toEqual({ subagentType: 'coder', description: 'fix it', prompt: 'Modify src/app.ts to add validation' });
   });
 
   it('extracts from JSON string at data.input', () => {
     const result = extractTaskInput({ input: '{"subagent_type":"issuer","description":"analyze"}' });
-    expect(result).toEqual({ subagentType: 'issuer', description: 'analyze' });
+    expect(result).toEqual({ subagentType: 'issuer', description: 'analyze', prompt: '' });
   });
 
   it('extracts from nested args: data.input.args', () => {
     const result = extractTaskInput({ input: { args: { subagent_type: 'reviewer', description: 'review PR' } } });
-    expect(result).toEqual({ subagentType: 'reviewer', description: 'review PR' });
+    expect(result).toEqual({ subagentType: 'reviewer', description: 'review PR', prompt: '' });
   });
 
   it('extracts from double-nested: data.input.input (object)', () => {
     const result = extractTaskInput({ input: { input: { subagent_type: 'coder', description: 'impl' } } });
-    expect(result).toEqual({ subagentType: 'coder', description: 'impl' });
+    expect(result).toEqual({ subagentType: 'coder', description: 'impl', prompt: '' });
   });
 
   it('extracts from double-nested: data.input.input (JSON string) — LangGraph actual format', () => {
@@ -276,26 +295,33 @@ describe('extractTaskInput', () => {
     const result = extractTaskInput({
       input: { input: '{"subagent_type":"coder","description":"implement the fix"}' },
     });
-    expect(result).toEqual({ subagentType: 'coder', description: 'implement the fix' });
+    expect(result).toEqual({ subagentType: 'coder', description: 'implement the fix', prompt: '' });
+  });
+
+  it('extracts prompt from JSON string format', () => {
+    const result = extractTaskInput({
+      input: { input: '{"subagent_type":"coder","description":"fix","prompt":"Update the handler"}' },
+    });
+    expect(result).toEqual({ subagentType: 'coder', description: 'fix', prompt: 'Update the handler' });
   });
 
   it('extracts from nested args as JSON string: data.input.args', () => {
     const result = extractTaskInput({
       input: { args: '{"subagent_type":"reviewer","description":"check PR"}' },
     });
-    expect(result).toEqual({ subagentType: 'reviewer', description: 'check PR' });
+    expect(result).toEqual({ subagentType: 'reviewer', description: 'check PR', prompt: '' });
   });
 
   it('extracts from tool_input wrapper: data.input.tool_input (object)', () => {
     const result = extractTaskInput({ input: { tool_input: { subagent_type: 'issuer', description: 'brief' } } });
-    expect(result).toEqual({ subagentType: 'issuer', description: 'brief' });
+    expect(result).toEqual({ subagentType: 'issuer', description: 'brief', prompt: '' });
   });
 
   it('extracts from tool_input wrapper: data.input.tool_input (JSON string)', () => {
     const result = extractTaskInput({
       input: { tool_input: '{"subagent_type":"issuer","description":"analyze issue"}' },
     });
-    expect(result).toEqual({ subagentType: 'issuer', description: 'analyze issue' });
+    expect(result).toEqual({ subagentType: 'issuer', description: 'analyze issue', prompt: '' });
   });
 
   it('falls back to JSON.stringify search when nested deeply', () => {
@@ -305,21 +331,162 @@ describe('extractTaskInput', () => {
 
   it('returns unknown when data is undefined', () => {
     const result = extractTaskInput(undefined);
-    expect(result.subagentType).toBe('unknown');
+    expect(result).toEqual({ subagentType: 'unknown', description: '', prompt: '' });
   });
 
   it('returns unknown when data.input is empty object', () => {
     const result = extractTaskInput({ input: {} });
-    expect(result.subagentType).toBe('unknown');
+    expect(result).toEqual({ subagentType: 'unknown', description: '', prompt: '' });
   });
 
   it('returns unknown when data.input is invalid JSON string', () => {
     const result = extractTaskInput({ input: 'not-json' });
-    expect(result.subagentType).toBe('unknown');
+    expect(result).toEqual({ subagentType: 'unknown', description: '', prompt: '' });
   });
 
-  it('defaults description to empty string when missing', () => {
+  it('defaults description and prompt to empty string when missing', () => {
     const result = extractTaskInput({ input: { subagent_type: 'coder' } });
-    expect(result).toEqual({ subagentType: 'coder', description: '' });
+    expect(result).toEqual({ subagentType: 'coder', description: '', prompt: '' });
+  });
+});
+
+// ── extractTextContent ──────────────────────────────────────────────────────
+
+describe('extractTextContent', () => {
+  it('returns string content as-is', () => {
+    expect(extractTextContent('Hello world')).toBe('Hello world');
+  });
+
+  it('returns empty string for empty string input', () => {
+    expect(extractTextContent('')).toBe('');
+  });
+
+  it('extracts text from array of content blocks', () => {
+    const content = [
+      { type: 'text', text: 'Based on the brief, ' },
+      { type: 'tool_use', id: 'abc', name: 'task', input: {} },
+      { type: 'text', text: 'I will delegate to the coder.' },
+    ];
+    expect(extractTextContent(content)).toBe('Based on the brief, \nI will delegate to the coder.');
+  });
+
+  it('returns empty string when array has no text blocks', () => {
+    const content = [
+      { type: 'tool_use', id: 'abc', name: 'task', input: {} },
+    ];
+    expect(extractTextContent(content)).toBe('');
+  });
+
+  it('returns empty string for undefined', () => {
+    expect(extractTextContent(undefined)).toBe('');
+  });
+
+  it('returns empty string for null', () => {
+    expect(extractTextContent(null)).toBe('');
+  });
+
+  it('returns empty string for number', () => {
+    expect(extractTextContent(42)).toBe('');
+  });
+
+  it('returns empty string for object (non-array)', () => {
+    expect(extractTextContent({ text: 'hello' })).toBe('');
+  });
+
+  it('skips blocks with non-string text', () => {
+    const content = [
+      { type: 'text', text: 123 },
+      { type: 'text', text: 'valid' },
+    ];
+    expect(extractTextContent(content)).toBe('valid');
+  });
+});
+
+// ── extractSubagentResponse ─────────────────────────────────────────────────
+
+describe('extractSubagentResponse', () => {
+  it('extracts kwargs.content from LangGraph Command output', () => {
+    const output = {
+      lg_name: 'Command',
+      update: {
+        files: {},
+        messages: [
+          {
+            lc: 1,
+            type: 'constructor',
+            id: ['langchain_core', 'messages', 'ToolMessage'],
+            kwargs: {
+              content: '## PLANNING PHASE\n\nI will modify CaseCard.tsx...',
+              tool_call_id: 'call_abc123',
+              name: 'task',
+            },
+          },
+        ],
+      },
+    };
+    expect(extractSubagentResponse(output)).toBe('## PLANNING PHASE\n\nI will modify CaseCard.tsx...');
+  });
+
+  it('joins multiple messages with double newline', () => {
+    const output = {
+      update: {
+        messages: [
+          { kwargs: { content: 'First message' } },
+          { kwargs: { content: 'Second message' } },
+        ],
+      },
+    };
+    expect(extractSubagentResponse(output)).toBe('First message\n\nSecond message');
+  });
+
+  it('returns plain string output as-is', () => {
+    expect(extractSubagentResponse('Agent response text')).toBe('Agent response text');
+  });
+
+  it('returns empty string for undefined', () => {
+    expect(extractSubagentResponse(undefined)).toBe('');
+  });
+
+  it('returns empty string for null', () => {
+    expect(extractSubagentResponse(null)).toBe('');
+  });
+
+  it('returns empty string for empty object', () => {
+    expect(extractSubagentResponse({})).toBe('');
+  });
+
+  it('handles direct messages array (no update wrapper)', () => {
+    const output = {
+      messages: [
+        { kwargs: { content: 'Direct message content' } },
+      ],
+    };
+    expect(extractSubagentResponse(output)).toBe('Direct message content');
+  });
+
+  it('handles messages with content field directly (no kwargs)', () => {
+    const output = {
+      messages: [
+        { content: 'Simple content' },
+      ],
+    };
+    expect(extractSubagentResponse(output)).toBe('Simple content');
+  });
+
+  it('falls back to direct content field', () => {
+    const output = { content: 'Fallback content' };
+    expect(extractSubagentResponse(output)).toBe('Fallback content');
+  });
+
+  it('skips messages with empty content', () => {
+    const output = {
+      update: {
+        messages: [
+          { kwargs: { content: '' } },
+          { kwargs: { content: 'Real content' } },
+        ],
+      },
+    };
+    expect(extractSubagentResponse(output)).toBe('Real content');
   });
 });

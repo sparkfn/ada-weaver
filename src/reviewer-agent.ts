@@ -105,6 +105,10 @@ CONSTRAINTS:
 - If the PR looks good, say so! Not every review needs to find problems.
 - Read at most 5 source files for context (don't over-explore).
 
+IMPORTANT — TOOL USAGE:
+- ONLY use the GitHub API tools: get_pr_diff, list_repo_files, read_repo_file, submit_pr_review.
+- You may see other tools (ls, write, edit, grep, glob, etc.) — these are sandbox filesystem tools. Do NOT use them. They have no access to the repository. All repo operations go through the GitHub API tools listed above.
+
 After submitting your review, your FINAL message must be a JSON object:
 {
   "verdict": "resolved" | "needs_changes",

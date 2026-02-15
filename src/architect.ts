@@ -25,7 +25,7 @@ import {
   createCheckCiStatusTool,
   createDryRunCheckCiStatusTool,
 } from './github-tools.js';
-import { formatDuration, logAgentEvent, logDiff } from './logger.js';
+import { formatDuration, logAgentEvent, logAgentDetail, logDiff } from './logger.js';
 import { buildReviewerSystemPrompt } from './reviewer-agent.js';
 import { findPrForIssue, findAllPrsForIssue } from './core.js';
 import type { Octokit } from 'octokit';
@@ -48,6 +48,83 @@ interface SubagentRun {
   label: string;
 }
 
+// ── LLM content extraction ───────────────────────────────────────────────────
+
+/**
+ * Extract the text portion from an LLM response content field.
+ *
+ * Handles both formats:
+ * - Plain string: `"Based on the brief..."`
+ * - Array of content blocks: `[{ type: 'text', text: '...' }, { type: 'tool_use', ... }]`
+ */
+export function extractTextContent(content: any): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((block: any) => block.type === 'text' && typeof block.text === 'string')
+      .map((block: any) => block.text)
+      .join('\n');
+  }
+  return '';
+}
+
+/**
+ * Extract the meaningful text response from a subagent's tool output.
+ *
+ * The raw output from LangGraph's `task` tool is a Command object:
+ * ```
+ * {
+ *   lg_name: "Command",
+ *   update: {
+ *     files: {},
+ *     messages: [{
+ *       lc: 1, type: "constructor",
+ *       id: ["langchain_core", "messages", "ToolMessage"],
+ *       kwargs: { content: "The actual agent response text...", ... }
+ *     }]
+ *   }
+ * }
+ * ```
+ *
+ * This function digs into that structure to return the `kwargs.content` string.
+ * Falls back to plain string output if the structure is different.
+ */
+export function extractSubagentResponse(output: any): string {
+  if (typeof output === 'string') return output;
+  if (!output || typeof output !== 'object') return '';
+
+  // LangGraph Command: output.update.messages[].kwargs.content
+  const messages = output?.update?.messages;
+  if (Array.isArray(messages)) {
+    const contents = messages
+      .map((msg: any) => {
+        const content = msg?.kwargs?.content;
+        if (typeof content === 'string') return content;
+        // content could also be an array of blocks
+        return extractTextContent(content);
+      })
+      .filter(Boolean);
+    if (contents.length > 0) return contents.join('\n\n');
+  }
+
+  // Direct messages array (no update wrapper)
+  if (Array.isArray(output?.messages)) {
+    const contents = output.messages
+      .map((msg: any) => {
+        const content = msg?.kwargs?.content ?? msg?.content;
+        if (typeof content === 'string') return content;
+        return extractTextContent(content);
+      })
+      .filter(Boolean);
+    if (contents.length > 0) return contents.join('\n\n');
+  }
+
+  // Fallback: if it has a content field directly
+  if (typeof output.content === 'string') return output.content;
+
+  return '';
+}
+
 // ── Event input extraction ───────────────────────────────────────────────────
 
 /**
@@ -55,10 +132,10 @@ interface SubagentRun {
  * event's data payload.  The structure varies across LangGraph / deepagents
  * versions — try multiple paths before falling back to 'unknown'.
  */
-export function extractTaskInput(data: any): { subagentType: string; description: string } {
-  const tryExtract = (obj: any): { subagentType: string; description: string } | null => {
+export function extractTaskInput(data: any): { subagentType: string; description: string; prompt: string } {
+  const tryExtract = (obj: any): { subagentType: string; description: string; prompt: string } | null => {
     if (obj && typeof obj === 'object' && typeof obj.subagent_type === 'string') {
-      return { subagentType: obj.subagent_type, description: obj.description ?? '' };
+      return { subagentType: obj.subagent_type, description: obj.description ?? '', prompt: obj.prompt ?? '' };
     }
     return null;
   };
@@ -129,7 +206,8 @@ export function extractTaskInput(data: any): { subagentType: string; description
     const match = json.match(/\\?"subagent_type\\?"\s*:\s*\\?"(\w+)\\?"/);
     if (match) {
       const descMatch = json.match(/\\?"description\\?"\s*:\s*\\?"([^"\\]{0,200})\\?"/);
-      return { subagentType: match[1], description: descMatch?.[1] ?? '' };
+      const promptMatch = json.match(/\\?"prompt\\?"\s*:\s*\\?"([^"\\]{0,500})\\?"/);
+      return { subagentType: match[1], description: descMatch?.[1] ?? '', prompt: promptMatch?.[1] ?? '' };
     }
   } catch { /* stringify can fail on circular refs */ }
 
@@ -140,41 +218,72 @@ export function extractTaskInput(data: any): { subagentType: string; description
     data && typeof data === 'object' ? Object.keys(data).join(', ') : typeof data
   }`);
 
-  return { subagentType: 'unknown', description: '' };
+  return { subagentType: 'unknown', description: '', prompt: '' };
 }
 
 // ── Subagent builders ────────────────────────────────────────────────────────
 
 /**
- * Create the Issuer subagent — understands issues, explores repo, produces a brief.
- * Read-only tools only.
+ * Create the Issuer subagent — understands issues, explores repo, produces a brief,
+ * and posts a formatted analysis comment on the issue.
  */
 export function createIssuerSubagent(
   owner: string,
   repo: string,
   octokit: Octokit,
-  model?: ReturnType<typeof createModel>,
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel> } = {},
 ): SubAgent {
+  const dryRun = opts.dryRun ?? false;
+
   const tools = [
     createGitHubIssuesTool(owner, repo, octokit),
     createListRepoFilesTool(owner, repo, octokit),
     createReadRepoFileTool(owner, repo, octokit),
     createFetchSubIssuesTool(owner, repo, octokit),
     createGetParentIssueTool(owner, repo, octokit),
+    dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
   ];
 
   const systemPrompt = `You are the Issuer agent for the GitHub repository ${owner}/${repo}.
 
-Your job is to thoroughly understand a GitHub issue and produce a brief for the team.
+Your job is to thoroughly understand a GitHub issue, produce a brief for the team, and post a formatted analysis comment on the issue itself.
 
 WORKFLOW:
 1. Read the issue title, body, and labels
 2. Check for sub-issues (fetch_sub_issues) and parent issue (get_parent_issue)
 3. Use list_repo_files to see the repository structure
 4. Use read_repo_file to read 2-5 files relevant to the issue
-5. Produce your brief as a natural language summary
+5. Post your analysis as a comment on the issue using comment_on_issue (see format below)
+6. Return your brief as your final message (the Architect will read it)
 
-YOUR BRIEF MUST INCLUDE:
+ISSUE COMMENT FORMAT:
+Post a well-formatted Markdown comment on the issue using comment_on_issue. The comment should help the issue author and other developers understand the analysis at a glance:
+
+\`\`\`markdown
+## 🔍 Issue Analysis
+
+**Type:** \`feature\` | **Complexity:** \`moderate\`
+
+### Summary
+<1-2 sentence plain-language summary of what is being asked>
+
+### Relevant Files
+- \`src/path/to/file.ts\` — <why this file is relevant>
+- \`src/path/to/other.ts\` — <why this file is relevant>
+
+### Recommended Approach
+1. <step one>
+2. <step two>
+3. <step three>
+
+### Additional Context
+<sub-issue relationships, base branch notes, or anything else relevant>
+
+---
+*🤖 Automated analysis by Deep Agents*
+\`\`\`
+
+YOUR BRIEF (returned as your final message) MUST INCLUDE:
 - Issue summary: what is being asked for
 - Issue type: bug, feature, docs, question, or unknown
 - Complexity: trivial, simple, moderate, or complex
@@ -185,16 +294,20 @@ YOUR BRIEF MUST INCLUDE:
 - Sub-issue context: if there are sub-issues or a parent, describe the relationship
 
 CONSTRAINTS:
-- You have READ-ONLY access. You CANNOT post comments, create branches, or open PRs.
 - Be thorough but concise. The Architect will use your brief to instruct the Coder.
-- Your output is natural language, not JSON. Write clearly and specifically.`;
+- Your final message output is natural language, not JSON. Write clearly and specifically.
+- Post the comment BEFORE returning your brief. The comment enriches the issue for humans; the brief is for the Architect.
+
+IMPORTANT — TOOL USAGE:
+- ONLY use the GitHub API tools: fetch_github_issues, list_repo_files, read_repo_file, fetch_sub_issues, get_parent_issue, comment_on_issue.
+- You may see other tools (ls, write, edit, grep, glob, etc.) — these are sandbox filesystem tools. Do NOT use them. They have no access to the repository. All repo operations go through the GitHub API tools listed above.`;
 
   return {
     name: 'issuer',
-    description: 'Understands GitHub issues — explores the repo, reads relevant files, and produces a brief with issue summary, type, complexity, relevant files, and recommended approach.',
+    description: 'Understands GitHub issues — explores the repo, reads relevant files, posts a formatted analysis comment on the issue, and produces a brief with issue summary, type, complexity, relevant files, and recommended approach.',
     systemPrompt,
     tools,
-    ...(model ? { model } : {}),
+    ...(opts.model ? { model: opts.model } : {}),
   };
 }
 
@@ -223,6 +336,16 @@ export function createCoderSubagent(
   const systemPrompt = `You are the Coder agent for the GitHub repository ${owner}/${repo}.
 
 Your job is to implement changes based on the Architect's instructions.
+
+CRITICAL — TOOL USAGE:
+You operate ENTIRELY through the GitHub API. You do NOT have local filesystem access.
+- To browse the repo: use list_repo_files and read_repo_file
+- To write code: use create_or_update_file (commits directly to GitHub)
+- To create branches: use create_branch
+- To open PRs: use create_pull_request
+- To comment on issues: use comment_on_issue
+- To create sub-issues: use create_sub_issue
+You may see other tools (ls, write, edit, grep, glob, etc.) — these are sandbox filesystem tools with NO access to the repository. NEVER use them. All repo operations MUST go through the GitHub API tools listed above.
 
 IMPORTANT: You MUST complete the PLANNING PHASE before writing any code.
 
@@ -349,7 +472,7 @@ You coordinate a team of specialist agents to process GitHub issues end-to-end. 
 
 YOUR TEAM:
 - **issuer**: Understands issues. Give it an issue number and it produces a brief (summary, type, complexity, relevant files, recommended approach, whether to proceed).
-- **coder**: Implements changes. Give it specific instructions based on the Issuer's brief. It creates branches, commits code, and opens draft PRs.
+- **coder**: Implements changes via the GitHub API. Give it specific instructions based on the Issuer's brief. It creates branches, commits code via create_or_update_file, and opens draft PRs. It does NOT have local filesystem access — all operations go through GitHub API tools.
 - **reviewer**: Reviews PRs. Give it a PR number and it reviews the diff, posts feedback, and returns a verdict (resolved or needs_changes with specific feedback items).
 
 STANDARD WORKFLOW:
@@ -400,6 +523,7 @@ CRITICAL RULES:
 - ALWAYS use the task tool to delegate. Never try to write code or post comments yourself.
 - When delegating to coder for fixes, always specify the existing branch name and PR number.
 - Your final message should be a clear summary of what was done and the outcome.
+- NEVER tell subagents they have "filesystem access" or "local file access". All subagents operate through GitHub API tools only. Do not mention filesystem, sandbox, ls, write, edit, grep, or glob tools in your instructions.
 
 AVAILABLE TOOLS FOR VERIFICATION (read-only):
 - fetch_github_issues: Check issue details
@@ -434,7 +558,7 @@ export function createArchitect(
 
   // Build subagents
   const subagents = [
-    createIssuerSubagent(owner, repo, octokit, issuerModel),
+    createIssuerSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: issuerModel }),
     createCoderSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: coderModel }),
     createReviewerSubagent(owner, repo, octokit, reviewerModel),
   ];
@@ -586,7 +710,7 @@ Skip the issuer step — go directly to the reviewer:
     if (ev.event === 'on_tool_start' && ev.name === 'task') {
       // Extract subagent_type from the tool input — the structure varies
       // across LangGraph / deepagents versions, so try multiple paths.
-      const { subagentType, description } = extractTaskInput(ev.data);
+      const { subagentType, description, prompt } = extractTaskInput(ev.data);
       const runId: string = ev.run_id ?? `run-${Date.now()}`;
 
       // Build iteration label
@@ -601,7 +725,12 @@ Skip the issuer step — go directly to the reviewer:
 
       activeRuns.set(runId, { subagentType, startTime: performance.now(), label });
 
-      logAgentEvent(subagentType, `started${label}`, description);
+      // Show the Architect is orchestrating by logging "ARCHITECT → SUBAGENT"
+      const instructionPreview = prompt || description;
+      logAgentEvent('architect', `\u2192 ${subagentType.toUpperCase()}${label}`, instructionPreview);
+      if (prompt) {
+        logAgentDetail(`Architect instructions to ${subagentType}`, prompt);
+      }
       options.onProgress?.({
         phase: subagentType,
         action: 'started',
@@ -617,6 +746,15 @@ Skip the issuer step — go directly to the reviewer:
         const duration = formatDuration(performance.now() - run.startTime);
 
         logAgentEvent(run.subagentType, `completed${run.label} (${duration})`);
+
+        // Log the subagent's response content so the user can see what it did.
+        // The raw output is a LangGraph Command object; the actual agent text is
+        // at output.update.messages[].kwargs.content (ToolMessage).
+        const agentResponse = extractSubagentResponse(ev.data?.output);
+        if (agentResponse) {
+          logAgentDetail(`${run.subagentType} output`, agentResponse);
+        }
+
         options.onProgress?.({
           phase: run.subagentType,
           action: 'completed',
@@ -630,9 +768,9 @@ Skip the issuer step — go directly to the reviewer:
           try {
             // Extract PR number from tool output or find via API
             let diffPrNumber: number | undefined;
-            const output = ev.data?.output;
-            const outputStr = typeof output === 'string' ? output : JSON.stringify(output ?? '');
-            const prMatch = outputStr.match(/PR\s*#(\d+)|pull\s*request\s*#?(\d+)|pull_number['":\s]+(\d+)/i);
+            // Search for PR number in agent response text, falling back to raw output JSON
+            const searchStr = agentResponse || JSON.stringify(ev.data?.output ?? '');
+            const prMatch = searchStr.match(/PR\s*#(\d+)|pull\s*request\s*#?(\d+)|pull_number['":\s]+(\d+)/i);
             if (prMatch) {
               diffPrNumber = parseInt(prMatch[1] || prMatch[2] || prMatch[3], 10);
             }
@@ -672,8 +810,19 @@ Skip the issuer step — go directly to the reviewer:
       chatModelStartTime = performance.now();
     } else if (ev.event === 'on_chat_model_end') {
       const content = ev.data?.output?.content;
-      if (typeof content === 'string' && content) {
-        lastResponse = content;
+      const textContent = extractTextContent(content);
+      if (textContent) {
+        lastResponse = textContent;
+      }
+
+      // Log the Architect's own reasoning (when no subagent is active)
+      if (activeRuns.size === 0 && textContent) {
+        logAgentEvent('architect', 'reasoning', textContent);
+        options.onProgress?.({
+          phase: 'architect',
+          action: 'reasoning',
+          detail: textContent.slice(0, 200),
+        });
       }
 
       // Record usage metrics

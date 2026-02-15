@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { wrapWithLogging, formatDuration, logAgentEvent, logDiff } from '../src/logger.js';
+import { wrapWithLogging, formatDuration, logAgentEvent, logAgentDetail, logDiff } from '../src/logger.js';
 import {
   createDryRunBranchTool,
   createDryRunCommentTool,
@@ -317,5 +317,65 @@ describe('logDiff', () => {
     const lines = consoleSpy.mock.calls.map((c) => c[0]);
     const banner = lines.find((l: string) => l.includes('Code Changes'));
     expect(banner).toBeDefined();
+  });
+});
+
+// ── logAgentDetail ──────────────────────────────────────────────────────────
+
+describe('logAgentDetail', () => {
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  it('prints the label in the header', () => {
+    logAgentDetail('issuer output', 'Issue #24 is a UI change');
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const header = lines.find((l: string) => l.includes('issuer output'));
+    expect(header).toBeDefined();
+  });
+
+  it('prints content lines with border', () => {
+    logAgentDetail('test', 'line one\nline two\nline three');
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    expect(lines.some((l: string) => l.includes('line one'))).toBe(true);
+    expect(lines.some((l: string) => l.includes('line two'))).toBe(true);
+    expect(lines.some((l: string) => l.includes('line three'))).toBe(true);
+  });
+
+  it('truncates at maxLines and shows remainder count', () => {
+    const content = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
+    logAgentDetail('test', content, 5);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const truncMsg = lines.find((l: string) => l.includes('more lines'));
+    expect(truncMsg).toBeDefined();
+    expect(truncMsg).toContain('25');
+  });
+
+  it('truncates long lines at 120 chars', () => {
+    const longLine = 'X'.repeat(200);
+    logAgentDetail('test', longLine);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const contentLine = lines.find((l: string) => l.includes('XXX'));
+    expect(contentLine).toBeDefined();
+    expect(contentLine!.includes('X'.repeat(200))).toBe(false);
+    expect(contentLine).toContain('...');
+  });
+
+  it('does not show truncation message when under maxLines', () => {
+    logAgentDetail('test', 'short\ncontent', 10);
+
+    const lines = consoleSpy.mock.calls.map((c) => c[0]);
+    const truncMsg = lines.find((l: string) => l.includes('more lines'));
+    expect(truncMsg).toBeUndefined();
   });
 });

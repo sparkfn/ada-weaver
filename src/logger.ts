@@ -35,6 +35,31 @@ export function logAgentEvent(agent: string, action: string, detail?: string): v
   console.log(`[${timestamp}] \u2500\u2500\u2500 ${agent.toUpperCase()} ${action} \u2500\u2500\u2500${detailStr}`);
 }
 
+/**
+ * Log a multi-line block of agent input or output with a labelled border.
+ *
+ * Used to show:
+ * - Architect's instructions (prompt) when delegating to a subagent
+ * - Subagent's response when it completes
+ *
+ * Output is truncated at `maxLines` and long lines are capped at 120 chars.
+ */
+export function logAgentDetail(label: string, content: string, maxLines = 20): void {
+  const lines = content.split('\n');
+  const display = lines.slice(0, maxLines);
+  const truncated = lines.length > maxLines;
+
+  console.log(`  \x1b[2m┌─ ${label}\x1b[0m`);
+  for (const line of display) {
+    const trimmed = line.length > 120 ? line.slice(0, 117) + '...' : line;
+    console.log(`  \x1b[2m│\x1b[0m ${trimmed}`);
+  }
+  if (truncated) {
+    console.log(`  \x1b[2m│\x1b[0m \x1b[33m... (${lines.length - maxLines} more lines)\x1b[0m`);
+  }
+  console.log(`  \x1b[2m└${'─'.repeat(40)}\x1b[0m`);
+}
+
 // ── ANSI colours for terminal diff output ────────────────────────────────────
 
 const RESET = '\x1b[0m';

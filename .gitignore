@@ -7,3 +7,4 @@ CLAUDE.md
 *.pem
 .env
 .workspaces/
+temp/

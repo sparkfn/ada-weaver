@@ -26,6 +26,7 @@ import {
   createDryRunCheckCiStatusTool,
 } from './github-tools.js';
 import { formatDuration, logAgentEvent, logAgentDetail, logDiff } from './logger.js';
+import { createIterationPruningMiddleware } from './context-pruning.js';
 import { buildReviewerSystemPrompt } from './reviewer-agent.js';
 import { ToolCache, wrapWithCache, wrapWriteWithInvalidation, readFileKey, listFilesKey, prDiffKey } from './tool-cache.js';
 import { findPrForIssue, findAllPrsForIssue } from './core.js';
@@ -618,6 +619,7 @@ export function createArchitect(
     tools: architectTools,
     subagents,
     systemPrompt,
+    middleware: [createIterationPruningMiddleware()],
   });
 
   return { agent, cache };

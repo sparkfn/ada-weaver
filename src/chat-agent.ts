@@ -1,4 +1,5 @@
-import { createDeepAgent } from 'deepagents';
+import { createPatchToolCallsMiddleware } from 'deepagents';
+import { createAgent, anthropicPromptCachingMiddleware } from 'langchain';
 import { MemorySaver } from '@langchain/langgraph';
 import type { Config } from './config.js';
 import { createModel } from './model.js';
@@ -70,12 +71,16 @@ When answering questions:
 - Reference specific files and line numbers when discussing code
 `;
 
-  const agent = createDeepAgent({
+  const agent = createAgent({
     model,
     tools: [issuesTool, listFilesTool, readFileTool],
     systemPrompt,
     checkpointer,
-  });
+    middleware: [
+      anthropicPromptCachingMiddleware({ unsupportedModelBehavior: 'ignore' }),
+      createPatchToolCallsMiddleware(),
+    ],
+  }).withConfig({ recursionLimit: 10_000 });
 
   return agent;
 }

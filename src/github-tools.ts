@@ -743,7 +743,7 @@ export function createGetPrDiffTool(octokit: Octokit, owner: string, repo: strin
         }));
         // When format: 'diff' is used, data comes back as a string
         const diff = data as unknown as string;
-        const MAX_DIFF_LENGTH = 50000;
+        const MAX_DIFF_LENGTH = 15_000;
         if (diff.length > MAX_DIFF_LENGTH) {
           return diff.slice(0, MAX_DIFF_LENGTH) + `\n\n... (diff truncated at ${MAX_DIFF_LENGTH} characters, total: ${diff.length})`;
         }

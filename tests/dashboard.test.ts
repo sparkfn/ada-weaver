@@ -5,6 +5,7 @@ import type express from 'express';
 import type { ProcessManager } from '../src/process-manager.js';
 import type { UsageService } from '../src/usage-service.js';
 import type { RepoRecord, RepoRepository } from '../src/repo-repository.js';
+import { InMemoryPricingRepository } from '../src/pricing-repository.js';
 
 // Mock dependencies so no real agents or GitHub calls happen
 vi.mock('../src/architect.js', () => ({
@@ -731,6 +732,153 @@ describe('Repo CRUD without database', () => {
 
   it('POST /api/repos returns 501', async () => {
     const res = await inject(app, 'POST', '/api/repos', { owner: 'a', repo: 'b' });
+    expect(res.status).toBe(501);
+  });
+});
+
+// ── Pricing CRUD Tests ──────────────────────────────────────────────────────
+
+describe('Pricing CRUD API', () => {
+  let app: express.Express;
+  let pricingRepository: InMemoryPricingRepository;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pricingRepository = new InMemoryPricingRepository();
+    const result = createDashboardApp(mockConfig, { pricingRepository });
+    app = result.app;
+  });
+
+  describe('GET /api/pricing', () => {
+    it('returns empty list initially', async () => {
+      const res = await inject(app, 'GET', '/api/pricing');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+  });
+
+  describe('POST /api/pricing', () => {
+    it('creates a pricing record (201)', async () => {
+      const res = await inject(app, 'POST', '/api/pricing', {
+        modelPrefix: 'gpt-5.2',
+        inputCostPerMillion: 1.75,
+        outputCostPerMillion: 14,
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.modelPrefix).toBe('gpt-5.2');
+      expect(res.body.inputCostPerMillion).toBe(1.75);
+      expect(res.body.outputCostPerMillion).toBe(14);
+      expect(res.body.id).toBeDefined();
+    });
+
+    it('returns 409 for duplicate modelPrefix', async () => {
+      await inject(app, 'POST', '/api/pricing', {
+        modelPrefix: 'gpt-5.2',
+        inputCostPerMillion: 1.75,
+        outputCostPerMillion: 14,
+      });
+      const res = await inject(app, 'POST', '/api/pricing', {
+        modelPrefix: 'gpt-5.2',
+        inputCostPerMillion: 2,
+        outputCostPerMillion: 20,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toContain('already exists');
+    });
+
+    it('returns 400 for missing fields', async () => {
+      const res = await inject(app, 'POST', '/api/pricing', { modelPrefix: 'gpt-5.2' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('required');
+    });
+  });
+
+  describe('PUT /api/pricing/:id', () => {
+    it('updates a pricing record', async () => {
+      const created = await inject(app, 'POST', '/api/pricing', {
+        modelPrefix: 'gpt-5.2',
+        inputCostPerMillion: 1.75,
+        outputCostPerMillion: 14,
+      });
+      const res = await inject(app, 'PUT', `/api/pricing/${created.body.id}`, {
+        inputCostPerMillion: 2.0,
+        outputCostPerMillion: 16,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.inputCostPerMillion).toBe(2.0);
+      expect(res.body.outputCostPerMillion).toBe(16);
+    });
+
+    it('returns 404 for unknown id', async () => {
+      const res = await inject(app, 'PUT', '/api/pricing/999', { inputCostPerMillion: 2 });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe('DELETE /api/pricing/:id', () => {
+    it('deletes a pricing record', async () => {
+      const created = await inject(app, 'POST', '/api/pricing', {
+        modelPrefix: 'gpt-5.2',
+        inputCostPerMillion: 1.75,
+        outputCostPerMillion: 14,
+      });
+      const res = await inject(app, 'DELETE', `/api/pricing/${created.body.id}`);
+      expect(res.status).toBe(200);
+      expect(res.body.deleted).toBe(true);
+      // Verify it's gone
+      const listRes = await inject(app, 'GET', '/api/pricing');
+      expect(listRes.body).toEqual([]);
+    });
+
+    it('returns 404 for unknown id', async () => {
+      const res = await inject(app, 'DELETE', '/api/pricing/999');
+      expect(res.status).toBe(404);
+    });
+  });
+});
+
+describe('Pricing defaults API', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const result = createDashboardApp(mockConfig);
+    app = result.app;
+  });
+
+  it('GET /api/pricing/defaults returns hardcoded table as array', async () => {
+    const res = await inject(app, 'GET', '/api/pricing/defaults');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBeGreaterThan(0);
+    const gpt52 = res.body.find((d: any) => d.modelPrefix === 'gpt-5.2');
+    expect(gpt52).toBeDefined();
+    expect(gpt52.inputCostPerMillion).toBe(1.75);
+    expect(gpt52.outputCostPerMillion).toBe(14);
+  });
+});
+
+describe('Pricing CRUD without database', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const result = createDashboardApp(mockConfig);
+    app = result.app;
+  });
+
+  it('GET /api/pricing without DB returns 501', async () => {
+    const res = await inject(app, 'GET', '/api/pricing');
+    expect(res.status).toBe(501);
+    expect(res.body.error).toContain('database');
+  });
+
+  it('POST /api/pricing without DB returns 501', async () => {
+    const res = await inject(app, 'POST', '/api/pricing', {
+      modelPrefix: 'test',
+      inputCostPerMillion: 1,
+      outputCostPerMillion: 2,
+    });
     expect(res.status).toBe(501);
   });
 });

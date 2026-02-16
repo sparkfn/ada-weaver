@@ -60,7 +60,7 @@ describe('createGetPrDiffTool', () => {
 
     expect(result.length).toBeLessThan(largeDiff.length);
     expect(result).toContain('truncated');
-    expect(result).toContain('50000');
+    expect(result).toContain('15000');
   });
 
   it('returns error string on API failure', async () => {

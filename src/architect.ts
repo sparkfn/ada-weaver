@@ -1,5 +1,6 @@
-import { createDeepAgent } from 'deepagents';
+import { createSubAgentMiddleware, createPatchToolCallsMiddleware } from 'deepagents';
 import type { SubAgent } from 'deepagents';
+import { createAgent, anthropicPromptCachingMiddleware, summarizationMiddleware } from 'langchain';
 import type { Config } from './config.js';
 import { createModel } from './model.js';
 import {
@@ -34,6 +35,7 @@ import { createWorkspace, resolveGitToken } from './workspace.js';
 import type { Workspace } from './workspace.js';
 import { formatDuration, logAgentEvent, logAgentDetail, logDiff } from './logger.js';
 import { createIterationPruningMiddleware } from './context-pruning.js';
+import { createContextCompactionMiddleware } from './context-compaction.js';
 import { buildReviewerSystemPrompt } from './reviewer-agent.js';
 import { ToolCache, wrapDiffWithDelta, prDiffKey } from './tool-cache.js';
 import { findPrForIssue, findAllPrsForIssue } from './core.js';
@@ -684,13 +686,33 @@ export async function createArchitect(
   const systemPrompt = buildArchitectSystemPrompt(owner, repo, maxIterations);
   const model = createModel(config);
 
-  const agent = createDeepAgent({
+  // Lean subagent middleware — no todoList or filesystem (those add duplicate tools)
+  const subagentMiddleware = [
+    createContextCompactionMiddleware(),
+    summarizationMiddleware({ model, trigger: { tokens: 50_000 }, keep: { messages: 6 } }),
+    anthropicPromptCachingMiddleware({ unsupportedModelBehavior: 'ignore' }),
+    createPatchToolCallsMiddleware(),
+  ];
+
+  const agent = createAgent({
     model,
     tools: architectTools,
-    subagents,
     systemPrompt,
-    middleware: [createIterationPruningMiddleware()],
-  });
+    middleware: [
+      createSubAgentMiddleware({
+        defaultModel: model,
+        defaultTools: architectTools,
+        defaultMiddleware: subagentMiddleware,
+        generalPurposeMiddleware: subagentMiddleware,
+        subagents,
+        generalPurposeAgent: false,
+      }),
+      summarizationMiddleware({ model, trigger: { tokens: 50_000 }, keep: { messages: 6 } }),
+      anthropicPromptCachingMiddleware({ unsupportedModelBehavior: 'ignore' }),
+      createPatchToolCallsMiddleware(),
+      createIterationPruningMiddleware(),
+    ],
+  }).withConfig({ recursionLimit: 10_000 });
 
   return { agent, cache, workspace };
 }

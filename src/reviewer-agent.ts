@@ -1,4 +1,5 @@
-import { createDeepAgent } from 'deepagents';
+import { createPatchToolCallsMiddleware } from 'deepagents';
+import { createAgent, anthropicPromptCachingMiddleware, summarizationMiddleware } from 'langchain';
 import type { Config } from './config.js';
 import { createModel } from './model.js';
 import {
@@ -189,11 +190,16 @@ export function createReviewerAgent(
 
   const systemPrompt = buildReviewerSystemPrompt(owner, repo, options.iterationContext);
 
-  const agent = createDeepAgent({
+  const agent = createAgent({
     model,
     tools: [diffTool, readFileTool, reviewTool],
     systemPrompt,
-  });
+    middleware: [
+      summarizationMiddleware({ model, trigger: { tokens: 50_000 }, keep: { messages: 6 } }),
+      anthropicPromptCachingMiddleware({ unsupportedModelBehavior: 'ignore' }),
+      createPatchToolCallsMiddleware(),
+    ],
+  }).withConfig({ recursionLimit: 10_000 });
 
   return agent;
 }

@@ -1,10 +1,11 @@
 import type { LLMProvider } from './usage-types.js';
+import type { PricingRepository, PricingRecord } from './pricing-repository.js';
 
 /**
  * Pricing per 1M tokens: [inputCostPerMillion, outputCostPerMillion]
  * Keyed by model name prefix — longest matching prefix wins.
  */
-const PRICING_TABLE: Record<string, [number, number]> = {
+export const PRICING_TABLE: Record<string, [number, number]> = {
   // Anthropic
   'claude-sonnet-4':        [3, 15],
   'claude-opus-4':          [15, 75],
@@ -16,6 +17,7 @@ const PRICING_TABLE: Record<string, [number, number]> = {
   'claude-3-haiku':         [0.25, 1.25],
 
   // OpenAI
+  'gpt-5.2':               [1.75, 14],
   'gpt-4o-mini':            [0.15, 0.60],
   'gpt-4o':                 [2.50, 10],
   'gpt-4-turbo':            [10, 30],
@@ -27,6 +29,39 @@ const PRICING_TABLE: Record<string, [number, number]> = {
 
 /** Providers that are always free (local / self-hosted). */
 const FREE_PROVIDERS = new Set<LLMProvider>(['ollama', 'openai-compatible']);
+
+export type PricingLookup = (model: string) => [number, number] | undefined;
+
+/** Optional DB lookup injected at startup. */
+let dbPricingLookup: PricingLookup | undefined;
+
+export function setPricingLookup(lookup: PricingLookup | undefined): void {
+  dbPricingLookup = lookup;
+}
+
+/**
+ * Build a PricingLookup from a repository's records.
+ * Uses the same longest-prefix matching logic as findPricing.
+ */
+export async function buildPricingLookup(repo: PricingRepository): Promise<PricingLookup> {
+  const records = await repo.list();
+  const table = new Map<string, [number, number]>();
+  for (const r of records) {
+    table.set(r.modelPrefix.toLowerCase(), [r.inputCostPerMillion, r.outputCostPerMillion]);
+  }
+  return (model: string): [number, number] | undefined => {
+    const lower = model.toLowerCase();
+    let bestMatch: [number, number] | undefined;
+    let bestLen = 0;
+    for (const [prefix, costs] of table) {
+      if (lower.startsWith(prefix) && prefix.length > bestLen) {
+        bestMatch = costs;
+        bestLen = prefix.length;
+      }
+    }
+    return bestMatch;
+  };
+}
 
 /**
  * Find the pricing entry for a model name using longest-prefix matching.
@@ -56,7 +91,7 @@ export function calculateCost(
 ): number {
   if (FREE_PROVIDERS.has(provider)) return 0;
 
-  const pricing = findPricing(model);
+  const pricing = dbPricingLookup?.(model) ?? findPricing(model);
   if (!pricing) return 0;
 
   const [inputRate, outputRate] = pricing;

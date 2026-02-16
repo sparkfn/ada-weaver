@@ -1,6 +1,6 @@
 import { tool } from 'langchain';
 
-export const DEFAULT_OUTPUT_CAP = 10_000;
+export const DEFAULT_OUTPUT_CAP = 6_000;
 
 /**
  * Wrap a LangChain tool with an output size cap.

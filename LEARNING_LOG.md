@@ -6509,6 +6509,78 @@ The AppBar also shows a repo count badge: `owner/repo (+N more)` when multiple r
 
 **Why `501 Not Implemented` for no-database mode?** The routes exist in the Express app regardless of database config, but they can't function without one. 501 signals "the server recognizes the request but can't fulfill it" — more informative than 404 (which would suggest the route doesn't exist) or 500 (which suggests a bug).
 
+---
+
+## Entry 62: Lean Agent Middleware — Eliminating Library Overhead (v2.6.0)
+
+**Date:** 2026-02-16
+**Author:** Architect Agent
+
+### The problem
+
+Simple bug fix tickets were consuming 420K-1.3M input tokens across 27-62 LLM calls. Investigation revealed that the deepagents library's `createDeepAgent` function silently injects middleware on every agent — including subagents — that adds significant per-call overhead:
+
+| Injected middleware | Impact | Used? |
+|---|---|---|
+| `todoListMiddleware()` | Adds todo tools + system prompt (~625 tokens/call) | Never |
+| `createFilesystemMiddleware()` | Adds 6 filesystem tools + system prompt (~1,325 tokens/call) | Duplicate — we have our own `read_file`, `list_files`, `grep`, etc. |
+| `BASE_PROMPT` | Generic prompt appended to system prompt (~30 tokens/call) | Unnecessary |
+| `summarizationMiddleware({ trigger: 170K })` | Only kicks in at 170K tokens — by then, massive cost already spent | Threshold too high |
+
+Total overhead: ~1,980 tokens/call. Across 27 calls (single-agent), that's ~53K wasted tokens. Across 60 calls (multi-agent with iterations), it's ~119K wasted tokens — just in unused middleware overhead.
+
+### Solution: `createAgent` with selective middleware
+
+The deepagents library exports `createSubAgentMiddleware`, `createPatchToolCallsMiddleware`, and other individual middleware. The langchain package exports `createAgent`, `anthropicPromptCachingMiddleware`, and `summarizationMiddleware`. By switching from `createDeepAgent` to `createAgent` and adding only the middleware we need, we eliminate all the overhead while keeping the features that matter.
+
+**Before (createDeepAgent always adds):**
+```
+todoListMiddleware()                    ← unused
+createFilesystemMiddleware()            ← duplicate tools
+createSubAgentMiddleware(...)           ← needed
+summarizationMiddleware(170K trigger)   ← threshold too high
+anthropicPromptCachingMiddleware()      ← needed
+createPatchToolCallsMiddleware()        ← needed
+BASE_PROMPT appended to system prompt   ← unnecessary
+```
+
+**After (createAgent with manual selection):**
+```
+createSubAgentMiddleware(...)           ← kept (architect only)
+summarizationMiddleware(50K trigger)    ← kept, threshold lowered 3.4x
+anthropicPromptCachingMiddleware()      ← kept
+createPatchToolCallsMiddleware()        ← kept
+createContextCompactionMiddleware()     ← added to subagents (was missing)
+```
+
+### Additional tuning
+
+Three caps were also lowered to reduce token waste from oversized outputs:
+
+| Setting | Old | New | Rationale |
+|---|---|---|---|
+| Tool output cap | 10K chars | 6K chars | 200-line file reads rarely need >6K chars of context |
+| PR diff cap | 50K chars | 15K chars | Diffs >15K are already too large for effective review |
+| Context compaction threshold | 80K chars | 40K chars | Start compacting old tool outputs sooner |
+
+### Key insight: subagent middleware matters
+
+A subtle but significant finding: subagents in multi-agent mode had NO context compaction middleware. Only the single-agent mode had it. This meant that within each subagent's conversation, tool outputs accumulated indefinitely — the Coder's `list_files` result from step 1 was still in full context during the PR creation at step 12. Adding `createContextCompactionMiddleware` to the subagent `defaultMiddleware` fixes this.
+
+### The `createDeepAgent` vs `createAgent` pattern
+
+This is a general lesson about high-level library wrappers. `createDeepAgent` is designed as a batteries-included convenience function — great for getting started, but it adds features you may not need. Once you understand what each middleware does, switching to the lower-level `createAgent` gives you full control over the token budget. The trade-off is more explicit configuration, but for a production system processing hundreds of issues, the per-call savings compound quickly.
+
+### Estimated impact
+
+For a simple bug fix (27 calls, single-agent):
+- Before: ~420K input tokens
+- After: ~260K-300K input tokens (~30-40% reduction)
+
+For multi-agent with iterations (60 calls):
+- Before: ~656K-1.3M input tokens
+- After: ~400K-700K input tokens (~35-45% reduction)
+
 **Why not validate PAT cross-repo access?** The system doesn't verify that the configured PAT or App token has access to a newly added repo. This is deliberate — validation would require an API call on every repo add, and the error would surface naturally when an agent tries to use the repo (e.g., failing to fetch issues). The user can use `test-access --issue N` against the repo to verify manually.
 
 **Why clone config instead of mutating?** `resolveRepoConfig()` returns a new config object with `{ ...this.config, github: { ...this.config.github, owner, repo } }`. This prevents mutation of the shared config, which could affect concurrent processes targeting different repos.

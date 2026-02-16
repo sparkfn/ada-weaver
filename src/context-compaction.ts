@@ -94,7 +94,7 @@ export function compactMessages(
  * N messages. Everything in between gets truncated.
  */
 export function createContextCompactionMiddleware(opts?: ContextCompactionOptions) {
-  const maxTotalChars = opts?.maxTotalChars ?? 80_000;
+  const maxTotalChars = opts?.maxTotalChars ?? 40_000;
   const maxToolResultChars = opts?.maxToolResultChars ?? 500;
   const preserveRecentCount = opts?.preserveRecentCount ?? 10;
 

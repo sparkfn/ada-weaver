@@ -9,6 +9,44 @@
 
 ---
 
+## v2.6.0 — 2026-02-16
+
+**Lean agent middleware & pricing CRUD.** Two major changes: (1) Switched all 4 agent entry points from `createDeepAgent` (deepagents library) to `createAgent` (langchain) with manually selected middleware — eliminating ~1,980 tokens/call of unused overhead from `todoListMiddleware`, `createFilesystemMiddleware` (duplicate tools), and `BASE_PROMPT`. Combined with lowered caps, estimated 30-45% reduction in input token usage. (2) Added a pricing management system with CRUD API, DB persistence, dashboard UI, and GPT-5.2 support.
+
+### Added
+- **Pricing CRUD API** — 5 new endpoints in `src/dashboard.ts`:
+  - `GET /api/pricing/defaults` — returns built-in pricing table
+  - `GET /api/pricing` — list DB pricing overrides
+  - `POST /api/pricing` — create a model pricing record (409 on duplicate)
+  - `PUT /api/pricing/:id` — update pricing record
+  - `DELETE /api/pricing/:id` — delete pricing record
+- **`PricingRepository`** interface (`src/pricing-repository.ts`) + PostgreSQL implementation (`src/db/pg-pricing-repository.ts`)
+- **DB migration** `003_pricing.sql` — `pricing` table with `model_prefix`, `input_cost_per_million`, `output_cost_per_million`
+- **`setPricingLookup` / `buildPricingLookup`** in `src/usage-pricing.ts` — DB pricing overrides built-in table via longest-prefix matching; refreshed on every pricing mutation
+- **GPT-5.2 pricing** added to built-in table ($1.75/$14 per 1M tokens)
+- **Dashboard Pricing tab** — view defaults + DB overrides, add/edit/delete pricing records inline
+- **Cost display** in Usage tab — shows estimated cost per model based on pricing lookup
+
+### Changed
+- **`src/architect.ts`** — replaced `createDeepAgent` with `createAgent` + `createSubAgentMiddleware`, `summarizationMiddleware` (50K threshold), `anthropicPromptCachingMiddleware`, `createPatchToolCallsMiddleware`; subagent `defaultMiddleware` now excludes `todoListMiddleware` and `createFilesystemMiddleware`, adds `createContextCompactionMiddleware`
+- **`src/single-agent.ts`** — replaced `createDeepAgent` with `createAgent` + selective middleware; summarization threshold lowered to 50K tokens
+- **`src/reviewer-agent.ts`** — replaced `createDeepAgent` with `createAgent` + selective middleware
+- **`src/chat-agent.ts`** — replaced `createDeepAgent` with `createAgent` + selective middleware
+- **Tool output cap** lowered from 10K → 6K chars (`src/tool-output-cap.ts`)
+- **Context compaction threshold** lowered from 80K → 40K chars (`src/context-compaction.ts`)
+- **PR diff cap** lowered from 50K → 15K chars (`src/github-tools.ts`)
+- **Subagents** in multi-agent mode now get context compaction middleware (previously only single-agent had it)
+- `calculateCost()` now checks DB pricing lookup before falling back to built-in table
+- `UsageService` tracks cost per record via pricing lookup
+
+### Tests
+- Updated diff truncation assertion in `tests/reviewer-agent.test.ts` (50000 → 15000)
+- Added pricing repository tests (`tests/pricing-repository.test.ts`)
+- Added pricing-related tests in `tests/usage-pricing.test.ts` and `tests/dashboard.test.ts`
+- **726 tests across 23 test files — all passing**
+
+---
+
 ## v2.5.0 — 2026-02-16
 
 **Multi-Repo CRUD.** The dashboard now supports managing multiple GitHub repositories. While the database schema already supported multi-repo (all tables FK to `repos.id`), there was no way to add or manage repos — only the env-var repo was auto-upserted on startup. This release adds a full CRUD interface for repos, a Repos tab in the dashboard, and per-process repo selection so any process can target a non-default repo.

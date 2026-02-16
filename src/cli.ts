@@ -11,6 +11,7 @@ import { runReviewSingle } from './reviewer-agent.js';
 import { startDashboardServer, startUnifiedServer } from './dashboard.js';
 import { createGitHubClient, getAuthFromConfig } from './github-tools.js';
 import { UsageService } from './usage-service.js';
+import { setPricingLookup, buildPricingLookup } from './usage-pricing.js';
 
 // ── Signal handlers for graceful shutdown ────────────────────────────────────
 
@@ -571,11 +572,15 @@ async function main() {
       console.log('\u{1F916} Deep Agents Unified Server\n');
       const { createRepositories } = await import('./db/repositories.js');
       const repos = await createRepositories(config);
+      if (config.database) {
+        setPricingLookup(await buildPricingLookup(repos.pricingRepository));
+      }
       activeServer = startUnifiedServer(config, {
         usageRepository: repos.usageRepository,
         processRepository: repos.processRepository,
         issueContextRepository: repos.issueContextRepository,
         repoRepository: config.database ? repos.repoRepository : undefined,
+        pricingRepository: config.database ? repos.pricingRepository : undefined,
         repoId: repos.repoId,
       });
       // Server runs until process is killed (SIGTERM/SIGINT)
@@ -620,11 +625,15 @@ async function main() {
       console.log('\u{1F916} Deep Agents Dashboard\n');
       const { createRepositories: createDashRepos } = await import('./db/repositories.js');
       const dashRepos = await createDashRepos(config);
+      if (config.database) {
+        setPricingLookup(await buildPricingLookup(dashRepos.pricingRepository));
+      }
       activeServer = startDashboardServer(config, dashPort, {
         usageRepository: dashRepos.usageRepository,
         processRepository: dashRepos.processRepository,
         issueContextRepository: dashRepos.issueContextRepository,
         repoRepository: config.database ? dashRepos.repoRepository : undefined,
+        pricingRepository: config.database ? dashRepos.pricingRepository : undefined,
         repoId: dashRepos.repoId,
       });
       // Server runs until process is killed (SIGTERM/SIGINT)

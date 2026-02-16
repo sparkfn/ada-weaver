@@ -9,6 +9,8 @@ import type { UsageRepository } from '../usage-repository.js';
 import { InMemoryUsageRepository } from '../usage-repository.js';
 import type { IssueContextRepository } from '../issue-context-repository.js';
 import { InMemoryIssueContextRepository } from '../issue-context-repository.js';
+import type { PricingRepository } from '../pricing-repository.js';
+import { InMemoryPricingRepository } from '../pricing-repository.js';
 import { initPool } from './connection.js';
 import { runMigrations } from './migrate.js';
 import { PostgresRepoRepository } from './pg-repo-repository.js';
@@ -16,6 +18,7 @@ import { PostgresPollRepository } from './pg-poll-repository.js';
 import { PostgresUsageRepository } from './pg-usage-repository.js';
 import { PostgresProcessRepository } from './pg-process-repository.js';
 import { PostgresIssueContextRepository } from './pg-issue-context-repository.js';
+import { PostgresPricingRepository } from './pg-pricing-repository.js';
 
 export interface Repositories {
   repoRepository: RepoRepository;
@@ -23,6 +26,7 @@ export interface Repositories {
   processRepository: ProcessRepository;
   usageRepository: UsageRepository;
   issueContextRepository: IssueContextRepository;
+  pricingRepository: PricingRepository;
   repoId: number;
 }
 
@@ -58,6 +62,7 @@ export async function createRepositories(config: Config): Promise<Repositories> 
       processRepository: new PostgresProcessRepository(pool, repoId),
       usageRepository: new PostgresUsageRepository(pool, repoId),
       issueContextRepository: new PostgresIssueContextRepository(pool, repoId),
+      pricingRepository: new PostgresPricingRepository(pool),
       repoId,
     };
   }
@@ -70,6 +75,7 @@ export async function createRepositories(config: Config): Promise<Repositories> 
     processRepository: new InMemoryProcessRepository(),
     usageRepository: new InMemoryUsageRepository(),
     issueContextRepository: new InMemoryIssueContextRepository(),
+    pricingRepository: new InMemoryPricingRepository(),
     repoId: 0,
   };
 }

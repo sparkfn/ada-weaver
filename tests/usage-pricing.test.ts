@@ -1,7 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { calculateCost } from '../src/usage-pricing.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { calculateCost, setPricingLookup } from '../src/usage-pricing.js';
 
 describe('calculateCost', () => {
+  afterEach(() => {
+    setPricingLookup(undefined);
+  });
+
   it('calculates cost for Claude Sonnet 4', () => {
     // $3/1M input, $15/1M output
     const cost = calculateCost('claude-sonnet-4-20250514', 'anthropic', 1000, 500);
@@ -74,5 +78,42 @@ describe('calculateCost', () => {
     // $3/1M input, $12/1M output
     const cost = calculateCost('o1-mini-2024-09-12', 'openai', 1000, 500);
     expect(cost).toBeCloseTo((1000 * 3 + 500 * 12) / 1_000_000, 8);
+  });
+
+  it('calculates cost for GPT-5.2', () => {
+    // $1.75/1M input, $14/1M output
+    const cost = calculateCost('gpt-5.2-2026-01-15', 'openai', 1000, 500);
+    expect(cost).toBeCloseTo((1000 * 1.75 + 500 * 14) / 1_000_000, 8);
+  });
+
+  it('uses DB override when set via setPricingLookup', () => {
+    // Override claude-sonnet-4 with custom pricing
+    setPricingLookup((model) => {
+      if (model.toLowerCase().startsWith('claude-sonnet-4')) return [100, 200];
+      return undefined;
+    });
+    const cost = calculateCost('claude-sonnet-4-20250514', 'anthropic', 1000, 500);
+    expect(cost).toBeCloseTo((1000 * 100 + 500 * 200) / 1_000_000, 8);
+  });
+
+  it('falls back to hardcoded when DB has no match', () => {
+    // DB lookup returns undefined, should fall back to hardcoded table
+    setPricingLookup(() => undefined);
+    const cost = calculateCost('claude-sonnet-4-20250514', 'anthropic', 1000, 500);
+    expect(cost).toBeCloseTo((1000 * 3 + 500 * 15) / 1_000_000, 8);
+  });
+
+  it('setPricingLookup(undefined) clears override', () => {
+    setPricingLookup((model) => {
+      if (model.toLowerCase().startsWith('claude-sonnet-4')) return [100, 200];
+      return undefined;
+    });
+    // Override active
+    let cost = calculateCost('claude-sonnet-4-20250514', 'anthropic', 1000, 500);
+    expect(cost).toBeCloseTo((1000 * 100 + 500 * 200) / 1_000_000, 8);
+    // Clear override
+    setPricingLookup(undefined);
+    cost = calculateCost('claude-sonnet-4-20250514', 'anthropic', 1000, 500);
+    expect(cost).toBeCloseTo((1000 * 3 + 500 * 15) / 1_000_000, 8);
   });
 });

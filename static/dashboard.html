@@ -901,6 +901,219 @@
       );
     }
 
+    // ── AddPricingDialog ──────────────────────────────────────────────────────
+
+    function AddPricingDialog({ open, onClose, onSaved, editing }) {
+      // editing can be: null (new), { id, ... } (edit existing), or { _prefill, ... } (override from default)
+      const isEdit = editing && !editing._prefill;
+      const [modelPrefix, setModelPrefix] = useState(editing ? editing.modelPrefix : '');
+      const [inputCost, setInputCost] = useState(editing ? String(editing.inputCostPerMillion) : '');
+      const [outputCost, setOutputCost] = useState(editing ? String(editing.outputCostPerMillion) : '');
+      const [error, setError] = useState('');
+
+      useEffect(() => {
+        if (editing) {
+          setModelPrefix(editing.modelPrefix);
+          setInputCost(String(editing.inputCostPerMillion));
+          setOutputCost(String(editing.outputCostPerMillion));
+        } else {
+          setModelPrefix('');
+          setInputCost('');
+          setOutputCost('');
+        }
+        setError('');
+      }, [editing, open]);
+
+      function handleSubmit() {
+        if (!modelPrefix.trim() || !inputCost || !outputCost) return;
+        const ic = parseFloat(inputCost);
+        const oc = parseFloat(outputCost);
+        if (isNaN(ic) || isNaN(oc) || ic < 0 || oc < 0) { setError('Costs must be non-negative numbers'); return; }
+        setError('');
+        const body = { modelPrefix: modelPrefix.trim(), inputCostPerMillion: ic, outputCostPerMillion: oc };
+        const url = isEdit ? `/api/pricing/${editing.id}` : '/api/pricing';
+        const method = isEdit ? 'PUT' : 'POST';
+        fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+          .then(async (res) => {
+            if (res.status === 409) { setError('Model prefix already exists'); return; }
+            if (!res.ok) { setError('Failed to save pricing'); return; }
+            const record = await res.json();
+            onSaved(record, isEdit);
+            onClose();
+          })
+          .catch(() => setError('Network error'));
+      }
+
+      return h(Dialog, { open, onClose, maxWidth: 'xs', fullWidth: true, PaperProps: { sx: { background: '#16213e' } } },
+        h(DialogTitle, null, isEdit ? 'Edit Pricing Override' : 'Add Pricing Override'),
+        h(DialogContent, null,
+          error ? h(Alert, { severity: 'error', sx: { mb: 2 } }, error) : null,
+          h(TextField, {
+            label: 'Model Prefix',
+            fullWidth: true,
+            value: modelPrefix,
+            onChange: (e) => setModelPrefix(e.target.value),
+            sx: { mb: 2, mt: 1 },
+            autoFocus: true,
+            placeholder: 'e.g. gpt-5.2',
+            disabled: isEdit,
+          }),
+          h(TextField, {
+            label: 'Input Cost per 1M Tokens ($)',
+            type: 'number',
+            fullWidth: true,
+            value: inputCost,
+            onChange: (e) => setInputCost(e.target.value),
+            sx: { mb: 2 },
+            inputProps: { step: '0.01', min: '0' },
+          }),
+          h(TextField, {
+            label: 'Output Cost per 1M Tokens ($)',
+            type: 'number',
+            fullWidth: true,
+            value: outputCost,
+            onChange: (e) => setOutputCost(e.target.value),
+            inputProps: { step: '0.01', min: '0' },
+          }),
+        ),
+        h(DialogActions, null,
+          h(Button, { onClick: onClose }, 'Cancel'),
+          h(Button, {
+            variant: 'contained',
+            onClick: handleSubmit,
+            disabled: !modelPrefix.trim() || !inputCost || !outputCost,
+          }, isEdit ? 'Save' : 'Add'),
+        ),
+      );
+    }
+
+    // ── PricingPanel ──────────────────────────────────────────────────────────
+
+    function PricingPanel({ pricing, defaults, onPricingChange }) {
+      const [addOpen, setAddOpen] = useState(false);
+      const [editing, setEditing] = useState(null);
+
+      function handleSaved(record, isEdit) {
+        if (isEdit) {
+          onPricingChange(pricing.map(p => p.id === record.id ? record : p));
+        } else {
+          onPricingChange([...pricing, record]);
+        }
+      }
+
+      function handleDelete(id) {
+        if (!confirm('Delete this pricing override?')) return;
+        fetch(`/api/pricing/${id}`, { method: 'DELETE' })
+          .then((res) => {
+            if (res.ok) {
+              onPricingChange(pricing.filter(p => p.id !== id));
+            }
+          })
+          .catch(() => {});
+      }
+
+      function handleEdit(record) {
+        setEditing(record);
+        setAddOpen(true);
+      }
+
+      function handleAddNew() {
+        setEditing(null);
+        setAddOpen(true);
+      }
+
+      function handleOverride(defaultEntry) {
+        // Pre-fill the dialog with the built-in default's values for creating a new override
+        setEditing({ _prefill: true, modelPrefix: defaultEntry.modelPrefix, inputCostPerMillion: defaultEntry.inputCostPerMillion, outputCostPerMillion: defaultEntry.outputCostPerMillion });
+        setAddOpen(true);
+      }
+
+      return h(Box, null,
+        // Custom Overrides section
+        h(Box, { sx: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 } },
+          h(Typography, { variant: 'h6' }, 'Custom Overrides'),
+          h(Button, { variant: 'contained', size: 'small', onClick: handleAddNew }, '+ Add Override'),
+        ),
+        pricing.length === 0
+          ? h(Box, { sx: { mb: 2 } })
+          : h(TableContainer, { component: Paper, sx: { background: '#16213e', mb: 4 } },
+              h(Table, { size: 'small' },
+                h(TableHead, null,
+                  h(TableRow, null,
+                    h(TableCell, null, 'Model Prefix'),
+                    h(TableCell, { align: 'right' }, 'Input $/1M'),
+                    h(TableCell, { align: 'right' }, 'Output $/1M'),
+                    h(TableCell, null, 'Updated'),
+                    h(TableCell, { align: 'right' }, 'Actions'),
+                  ),
+                ),
+                h(TableBody, null,
+                  pricing.map(r =>
+                    h(TableRow, { key: r.id },
+                      h(TableCell, null, r.modelPrefix),
+                      h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, '$' + r.inputCostPerMillion.toFixed(2)),
+                      h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, '$' + r.outputCostPerMillion.toFixed(2)),
+                      h(TableCell, null, new Date(r.updatedAt).toLocaleDateString()),
+                      h(TableCell, { align: 'right' },
+                        h(Button, { size: 'small', onClick: () => handleEdit(r) }, 'Edit'),
+                        h(Button, { size: 'small', color: 'error', onClick: () => handleDelete(r.id) }, 'Delete'),
+                      ),
+                    )
+                  ),
+                ),
+              ),
+            ),
+
+        // Built-in Defaults section (read-only)
+        h(Typography, { variant: 'h6', sx: { mb: 2 } }, 'Built-in Defaults'),
+        defaults.length === 0
+          ? h(Typography, { color: 'text.secondary' }, 'Loading...')
+          : h(TableContainer, { component: Paper, sx: { background: '#16213e' } },
+              h(Table, { size: 'small' },
+                h(TableHead, null,
+                  h(TableRow, null,
+                    h(TableCell, null, 'Model Prefix'),
+                    h(TableCell, { align: 'right' }, 'Input $/1M'),
+                    h(TableCell, { align: 'right' }, 'Output $/1M'),
+                    h(TableCell, { align: 'center', sx: { width: 100 } }, 'Status'),
+                  ),
+                ),
+                h(TableBody, null,
+                  defaults.map(d => {
+                    const hasOverride = pricing.some(p => p.modelPrefix.toLowerCase() === d.modelPrefix.toLowerCase());
+                    return h(TableRow, {
+                      key: d.modelPrefix,
+                      hover: true,
+                      onClick: () => handleOverride(d),
+                      sx: { cursor: 'pointer' },
+                    },
+                      h(TableCell, null, d.modelPrefix),
+                      h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, '$' + d.inputCostPerMillion.toFixed(2)),
+                      h(TableCell, { align: 'right', sx: { fontFamily: 'monospace' } }, '$' + d.outputCostPerMillion.toFixed(2)),
+                      h(TableCell, { align: 'center' },
+                        hasOverride
+                          ? h(Chip, { label: 'Overridden', size: 'small', color: 'info', variant: 'outlined' })
+                          : null,
+                      ),
+                    );
+                  }),
+                ),
+              ),
+            ),
+
+        h(AddPricingDialog, {
+          open: addOpen,
+          onClose: () => { setAddOpen(false); setEditing(null); },
+          onSaved: handleSaved,
+          editing,
+        }),
+      );
+    }
+
     // ── App ────────────────────────────────────────────────────────────────────
 
     function App() {
@@ -914,12 +1127,16 @@
       const [processLogs, setProcessLogs] = useState({});
       const [usageRefreshKey, setUsageRefreshKey] = useState(0);
       const [repos, setRepos] = useState([]);
+      const [pricing, setPricing] = useState([]);
+      const [pricingDefaults, setPricingDefaults] = useState([]);
 
       // Fetch initial data
       useEffect(() => {
         fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {});
         fetch('/api/processes').then(r => r.json()).then(setProcesses).catch(() => {});
         fetch('/api/repos?activeOnly=false').then(r => r.json()).then(setRepos).catch(() => {});
+        fetch('/api/pricing').then(r => r.ok ? r.json() : []).then(setPricing).catch(() => {});
+        fetch('/api/pricing/defaults').then(r => r.json()).then(setPricingDefaults).catch(() => {});
       }, []);
 
       // SSE connection with auto-reconnect
@@ -1096,12 +1313,15 @@
                   h(Tab, { label: 'Processes' }),
                   h(Tab, { label: 'Usage' }),
                   h(Tab, { label: 'Repos' }),
+                  h(Tab, { label: 'Pricing' }),
                 ),
                 tab === 0
                   ? h(ProcessesTable, { processes, onSelect: handleSelect, onCancel: handleCancel })
                   : tab === 1
                     ? h(UsagePanel, { refreshKey: usageRefreshKey })
-                    : h(ReposPanel, { repos, onReposChange: setRepos }),
+                    : tab === 2
+                      ? h(ReposPanel, { repos, onReposChange: setRepos })
+                      : h(PricingPanel, { pricing, defaults: pricingDefaults, onPricingChange: setPricing }),
               ),
         ),
 

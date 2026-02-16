@@ -10,6 +10,8 @@ import type { UsageRepository } from './usage-repository.js';
 import type { ProcessRepository } from './process-repository.js';
 import type { IssueContextRepository } from './issue-context-repository.js';
 import type { RepoRepository } from './repo-repository.js';
+import type { PricingRepository } from './pricing-repository.js';
+import { PRICING_TABLE, setPricingLookup, buildPricingLookup } from './usage-pricing.js';
 import { verifySignature, handleWebhookEvent } from './listener.js';
 import { chatStream } from './chat-agent.js';
 
@@ -54,6 +56,7 @@ export interface DashboardOptions {
   processRepository?: ProcessRepository;
   issueContextRepository?: IssueContextRepository;
   repoRepository?: RepoRepository;
+  pricingRepository?: PricingRepository;
   repoId?: number;
 }
 
@@ -232,6 +235,105 @@ export function createDashboardApp(config: Config, options?: DashboardOptions): 
       return;
     }
     res.json({ deactivated: true });
+  });
+
+  // ── Pricing CRUD endpoints ──────────────────────────────────────────────────
+
+  app.get('/api/pricing/defaults', (_req: Request, res: Response) => {
+    const defaults = Object.entries(PRICING_TABLE).map(([prefix, [input, output]]) => ({
+      modelPrefix: prefix,
+      inputCostPerMillion: input,
+      outputCostPerMillion: output,
+    }));
+    res.json(defaults);
+  });
+
+  /** Rebuild the in-memory pricing lookup from the DB after a mutation. */
+  async function refreshPricingLookup() {
+    if (options?.pricingRepository) {
+      setPricingLookup(await buildPricingLookup(options.pricingRepository));
+    }
+  }
+
+  app.get('/api/pricing', async (_req: Request, res: Response) => {
+    if (!options?.pricingRepository) {
+      res.status(501).json({ error: 'Pricing management requires a database' });
+      return;
+    }
+    const records = await options.pricingRepository.list();
+    res.json(records);
+  });
+
+  app.post('/api/pricing', async (req: Request, res: Response) => {
+    if (!options?.pricingRepository) {
+      res.status(501).json({ error: 'Pricing management requires a database' });
+      return;
+    }
+    const { modelPrefix, inputCostPerMillion, outputCostPerMillion } = req.body as {
+      modelPrefix?: string;
+      inputCostPerMillion?: number;
+      outputCostPerMillion?: number;
+    };
+    if (!modelPrefix || typeof modelPrefix !== 'string' ||
+        inputCostPerMillion === undefined || typeof inputCostPerMillion !== 'number' ||
+        outputCostPerMillion === undefined || typeof outputCostPerMillion !== 'number') {
+      res.status(400).json({ error: 'modelPrefix (string), inputCostPerMillion (number), and outputCostPerMillion (number) are required' });
+      return;
+    }
+    try {
+      const record = await options.pricingRepository.create(modelPrefix.trim(), inputCostPerMillion, outputCostPerMillion);
+      await refreshPricingLookup();
+      res.status(201).json(record);
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        res.status(409).json({ error: 'Model prefix already exists' });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  app.put('/api/pricing/:id', async (req: Request, res: Response) => {
+    if (!options?.pricingRepository) {
+      res.status(501).json({ error: 'Pricing management requires a database' });
+      return;
+    }
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ error: 'Invalid pricing id' });
+      return;
+    }
+    const { modelPrefix, inputCostPerMillion, outputCostPerMillion } = req.body as {
+      modelPrefix?: string;
+      inputCostPerMillion?: number;
+      outputCostPerMillion?: number;
+    };
+    const updated = await options.pricingRepository.update(id, { modelPrefix, inputCostPerMillion, outputCostPerMillion });
+    if (!updated) {
+      res.status(404).json({ error: 'Pricing record not found' });
+      return;
+    }
+    await refreshPricingLookup();
+    res.json(updated);
+  });
+
+  app.delete('/api/pricing/:id', async (req: Request, res: Response) => {
+    if (!options?.pricingRepository) {
+      res.status(501).json({ error: 'Pricing management requires a database' });
+      return;
+    }
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ error: 'Invalid pricing id' });
+      return;
+    }
+    const deleted = await options.pricingRepository.delete(id);
+    if (!deleted) {
+      res.status(404).json({ error: 'Pricing record not found' });
+      return;
+    }
+    await refreshPricingLookup();
+    res.json({ deleted: true });
   });
 
   // ── Usage API endpoints ─────────────────────────────────────────────────────

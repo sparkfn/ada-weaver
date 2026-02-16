@@ -1,5 +1,5 @@
-import { createDeepAgent } from 'deepagents';
-import { tool } from 'langchain';
+import { createPatchToolCallsMiddleware } from 'deepagents';
+import { createAgent, anthropicPromptCachingMiddleware, summarizationMiddleware, tool } from 'langchain';
 import type { Config } from './config.js';
 import { createModel } from './model.js';
 import {
@@ -216,15 +216,18 @@ export async function createSingleAgent(config: Config, options: {
   const systemPrompt = buildSingleAgentSystemPrompt(owner, repo, modelName, maxIterations);
   const model = createModel(config);
 
-  const agent = createDeepAgent({
+  const agent = createAgent({
     model,
     tools: allTools,
     systemPrompt,
     middleware: [
       createContextCompactionMiddleware(),
+      summarizationMiddleware({ model, trigger: { tokens: 50_000 }, keep: { messages: 6 } }),
+      anthropicPromptCachingMiddleware({ unsupportedModelBehavior: 'ignore' }),
+      createPatchToolCallsMiddleware(),
       createIterationPruningMiddleware(),
     ],
-  });
+  }).withConfig({ recursionLimit: 10_000 });
 
   return { agent, cache, workspace };
 }

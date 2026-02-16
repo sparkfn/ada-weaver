@@ -9,6 +9,7 @@ import type { Config } from './config.js';
  * Supported providers:
  *   - "anthropic"          → ChatAnthropic (Claude)
  *   - "openai"             → ChatOpenAI (GPT-4, etc.)
+ *   - "openai-responses"   → ChatOpenAI with OpenAI Responses API (web search, code interpreter, etc.)
  *   - "openai-compatible"  → ChatOpenAI with custom baseUrl (Ollama, LM Studio, Together, Groq, etc.)
  *   - "ollama"             → Shorthand for openai-compatible with Ollama's default baseUrl
  */
@@ -26,6 +27,14 @@ export function createModel(config: Config) {
       return new ChatOpenAI({
         apiKey,
         model: model || 'gpt-4',
+        ...(baseUrl ? { configuration: { baseURL: baseUrl } } : {}),
+      });
+
+    case 'openai-responses':
+      return new ChatOpenAI({
+        apiKey,
+        model: model || 'gpt-4o',
+        useResponsesApi: true,
         ...(baseUrl ? { configuration: { baseURL: baseUrl } } : {}),
       });
 
@@ -47,7 +56,7 @@ export function createModel(config: Config) {
 
     default:
       throw new Error(
-        `Unsupported provider: "${provider}". Use: anthropic, openai, openai-compatible, or ollama`
+        `Unsupported provider: "${provider}". Use: anthropic, openai, openai-responses, openai-compatible, or ollama`
       );
   }
 }

@@ -74,6 +74,34 @@ describe('createModel', () => {
     );
   });
 
+  it('creates ChatOpenAI with useResponsesApi for "openai-responses"', () => {
+    createModel({
+      llm: { provider: 'openai-responses', apiKey: 'sk-openai', model: 'gpt-4o' },
+    } as any);
+
+    expect(ChatOpenAI).toHaveBeenCalledTimes(1);
+    expect(ChatOpenAI).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiKey: 'sk-openai',
+        model: 'gpt-4o',
+        useResponsesApi: true,
+      })
+    );
+  });
+
+  it('uses default model gpt-4o for openai-responses when model is empty', () => {
+    createModel({
+      llm: { provider: 'openai-responses', apiKey: 'sk-openai', model: '' },
+    } as any);
+
+    expect(ChatOpenAI).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gpt-4o',
+        useResponsesApi: true,
+      })
+    );
+  });
+
   it('creates ChatOpenAI with custom baseUrl for "openai-compatible"', () => {
     createModel({
       llm: { provider: 'openai-compatible', apiKey: 'key', model: 'my-model', baseUrl: 'http://localhost:1234/v1' },

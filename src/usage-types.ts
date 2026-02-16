@@ -1,4 +1,4 @@
-export type LLMProvider = 'anthropic' | 'openai' | 'openai-compatible' | 'ollama';
+export type LLMProvider = 'anthropic' | 'openai' | 'openai-responses' | 'openai-compatible' | 'ollama';
 export type AgentRole = 'architect' | 'issuer' | 'coder' | 'reviewer' | 'chat';
 
 export interface LLMUsageRecord {

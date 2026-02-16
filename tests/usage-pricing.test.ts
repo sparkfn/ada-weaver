@@ -39,6 +39,11 @@ describe('calculateCost', () => {
     expect(costMini).toBeLessThan(costFull);
   });
 
+  it('calculates cost for openai-responses provider (same as openai)', () => {
+    const cost = calculateCost('gpt-4o-2024-05-13', 'openai-responses', 1000, 500);
+    expect(cost).toBeCloseTo((1000 * 2.50 + 500 * 10) / 1_000_000, 8);
+  });
+
   it('returns 0 for ollama provider', () => {
     const cost = calculateCost('llama3.2', 'ollama', 10000, 5000);
     expect(cost).toBe(0);

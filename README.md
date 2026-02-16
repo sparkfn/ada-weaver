@@ -26,6 +26,10 @@ A learning project for understanding Deep Agents / LangGraph patterns. An AI age
                     └─────────┘ └──────┘ └──────────┘
 ```
 
+**Two modes:**
+- **Multi-agent** (default, `AGENT_MODE=multi`): Architect supervisor delegates to 3 specialist subagents
+- **Single-agent** (`AGENT_MODE=single`): One agent handles everything in a single context window with automatic context compaction
+
 When an issue is opened, the **Architect** supervisor coordinates three specialist subagents:
 1. **Issuer** — explores the repo and produces a brief (issue type, complexity, relevant files, approach)
 2. **Coder** — comments on issue, creates branch, commits files, opens draft PR
@@ -535,7 +539,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-561 tests across 17 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+673 tests across 21 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 
@@ -567,6 +571,10 @@ learning-deep-agents/
     core.ts           -- Shared logic (poll cycle, state management, graceful shutdown)
     architect.ts      -- Architect supervisor agent with Issuer, Coder, Reviewer subagents
     context-pruning.ts -- Iteration pruning middleware (compresses old review-fix cycle messages)
+    context-compaction.ts -- Context compaction middleware (truncates old messages when context exceeds threshold)
+    single-agent.ts   -- Single-agent mode (one agent, all tools, full lifecycle in one context window)
+    local-tools.ts    -- Local filesystem tools (read, list, grep, edit, write, bash) for workspace clones
+    workspace.ts      -- Workspace lifecycle (clone repo, configure git, cleanup)
     index.ts          -- Original entry point (thin wrapper, backwards-compatible)
     config.ts         -- Loads config from .env (GitHub + LLM + webhook + database)
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
@@ -598,7 +606,11 @@ learning-deep-agents/
         001_initial_schema.sql -- Full schema: repos, poll_state, issue_actions, agent_processes, llm_usage
   tests/
     architect.test.ts -- Architect supervisor, subagent factories, extractTaskInput, system prompt tests
+    single-agent.test.ts -- Single-agent system prompt, tool assembly, dry-run, context tool tests
     context-pruning.test.ts -- Iteration pruning middleware tests (boundary detection, compression, edge cases)
+    context-compaction.test.ts -- Context compaction middleware tests (threshold, truncation, preservation, idempotency)
+    local-tools.test.ts -- Local filesystem tool tests (read, list, grep, edit, write, bash)
+    workspace.test.ts -- Workspace cloning and cleanup tests
     tool-cache.test.ts -- ToolCache, wrapWithCache, wrapWriteWithInvalidation, cache+circuit breaker integration
     core.test.ts      -- Unit tests for core logic, state, graceful shutdown
     github-tools.test.ts -- Idempotency and tool tests (mocked Octokit)

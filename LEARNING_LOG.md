@@ -6324,3 +6324,79 @@ This means the delta is computed transparently — the reviewer just calls `get_
 - **Entry 54** (Shared File Cache): This builds directly on the cache infrastructure. `wrapDiffWithDelta` is a specialized variant of `wrapWithCache` that adds delta computation. The `previousDiffs` map lives on the same `ToolCache` class.
 - **Entry 55** (Conversation Pruning): Pruning reduces stale messages in the LLM's context window; delta diffs reduce the size of new messages injected into the context. Both reduce input tokens but at different layers.
 - **Entry 10** (`read_repo_file` implementation): The original 500-line truncation was the only control over file read size. `startLine`/`endLine` gives agents fine-grained control without changing the truncation behavior for unparameterized reads.
+
+## Entry 59: Single-Agent Mode & Context Compaction (v2.2.0)
+
+**Date:** 2026-02-16
+**Author:** Architect Agent
+
+### The problem
+
+The multi-agent Architect pattern (Issuer → Coder → Reviewer) splits work across 3 specialist subagents, each with their own context window. This means each subagent starts fresh — the Coder doesn't see the Issuer's raw tool outputs, the Reviewer doesn't see the Coder's reasoning about implementation choices. The Architect paraphrases between them, losing nuance. The issue context system (Entry 57) helps, but it's an external store — the agent still doesn't have the actual working memory from earlier phases.
+
+A single-agent mode keeps everything in one context window: the agent sees its own analysis when planning, sees its plan when coding, sees the full code context when self-reviewing. No information is lost between phases.
+
+The tradeoff is context size. A single agent accumulating tool results across 5 phases (analysis, planning, implementation, review, fix iteration) can easily exceed the context window. This requires automatic context compaction.
+
+### Solution: Single-agent mode with `AGENT_MODE=single`
+
+**Tool assembly** (`buildSingleAgentTools`): Combines all 15 tools from the three subagent roles into a single flat array. No duplicates since each tool factory produces a unique name. The tool set is:
+- 4 read-only exploration tools (issues, list_files, read_file, grep)
+- 2 issue graph tools (sub-issues, parent)
+- 6 write tools (comment, edit_file, write_file, bash, create_pr, create_sub_issue)
+- 2 review tools (get_pr_diff, submit_pr_review)
+- 1 CI tool (check_ci_status)
+
+All respect dry-run mode — the same conditional pattern as the subagent factories.
+
+**System prompt** (`buildSingleAgentSystemPrompt`): A comprehensive 5-phase prompt covering the full lifecycle:
+1. Issue analysis (read issue, explore repo, post comment)
+2. Planning (read files, identify patterns, produce execution plan)
+3. Implementation (branch, edit, commit, push, open PR)
+4. Self-review (fetch diff, evaluate critically, submit review)
+5. Fix iteration (if review found issues, fix and re-review)
+
+Plus a CONTINUE MODE section for resuming existing PRs (skip to phase 4).
+
+The model name is embedded in the prompt (`Your name is {modelName}`) so it appears in logs and usage tracking.
+
+**Runner** (`runSingleAgent`): Same signature and return type as `runArchitect()`. Key differences:
+- No subagent tracking (no `task` tool events to intercept)
+- Phase detection from tool names: `fetch_github_issues` → analysis, `edit_file` → coding, `get_pr_diff` → review
+- Usage recorded with agent = model name (not a generic role)
+- Same post-run logic: PR discovery, usage summary comment, cache stats
+
+**Mode branching**: A single `if (config.agentMode === 'single')` at the top of `runArchitect()` with a dynamic import. The single-agent module only loads when needed.
+
+### Context compaction middleware
+
+The compaction middleware (`createContextCompactionMiddleware`) runs before each model call and works like a garbage collector for old context:
+
+1. Calculate total chars across all messages
+2. If under threshold (default 80K chars, ~20K tokens) → pass through unchanged
+3. If over threshold → compact messages in range `[1, messages.length - preserveRecentCount)`:
+   - **ToolMessages**: Truncate content to 500 chars + `[... compacted — original was N chars]`
+   - **AIMessages (text)**: Truncate to 200 chars + note
+   - **AIMessages (tool calls)**: Truncate long string args to 200 chars
+   - **Index 0** (seed HumanMessage): Always preserved
+   - **Recent N messages** (default 10): Always preserved
+
+An idempotency guard checks for `[... compacted` in content before truncating, preventing re-compaction from changing the "original was N chars" note.
+
+This complements the iteration pruning middleware (Entry 55) — both are applied in the single-agent pipeline. Iteration pruning triggers at review-fix boundaries; compaction triggers on total size regardless of boundaries.
+
+### Design decisions
+
+**Why widen `AgentRole` to `(string & {})`?** The user wanted usage tracking to show the actual model name (e.g., `claude-sonnet-4-20250514`) in the agent column, not a generic `single-agent` string. The `(string & {})` TypeScript pattern preserves autocomplete for the known literal values (`architect`, `issuer`, etc.) while accepting arbitrary strings at runtime. This is cleaner than adding every possible model name to the union.
+
+**Why dynamic import?** `if (config.agentMode === 'single') { const { runSingleAgent } = await import('./single-agent.js'); }` avoids loading the single-agent module and its dependencies when running in multi-agent mode. The module imports the context compaction middleware, tool factories, etc. — unnecessary overhead when the Architect handles things.
+
+**Why both compaction AND pruning middleware?** They're complementary. Iteration pruning is structure-aware — it finds reviewer delegation boundaries and compresses specifically the messages before the latest review cycle. Compaction is size-aware — it triggers on total chars regardless of message structure. In a long single-agent run that hasn't hit a review boundary yet (e.g., still in the coding phase), compaction prevents OOM while pruning would be a no-op.
+
+**Why not use the model name in the `agent` field for multi-agent mode too?** In multi-agent mode, the agent breakdown (architect/issuer/coder/reviewer) is genuinely useful — it shows how tokens are distributed across the pipeline. In single-agent mode, there's only one agent, so the model name is more informative than a role label.
+
+### Connections to previous entries
+
+- **Entry 46** (Architect Supervisor): The single-agent mode is an alternative to the Architect pattern. Same entry point (`runArchitect`), same result type, same callers — but instead of supervisor → subagent delegation, one agent does everything sequentially.
+- **Entry 55** (Conversation Pruning): Both middlewares reduce context size but at different layers. Pruning is iteration-aware; compaction is size-aware. The single agent uses both.
+- **Entry 57** (Issue Context System): Context tools are included in the single agent's toolkit. The agent can still save/read shared context, but the primary benefit (avoiding information loss between agents) is less critical when there's only one agent.

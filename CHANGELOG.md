@@ -9,6 +9,32 @@
 
 ---
 
+## v2.2.0 — 2026-02-16
+
+**Single-Agent Mode & Context Compaction.** Adds an alternative execution mode where one agent handles the entire issue lifecycle (analysis, planning, implementation, self-review, fix iterations) in a single context window, retaining full working memory across phases. When context grows too large, a compaction middleware automatically truncates old messages. Usage tracking records the LLM model name as the agent identifier instead of a generic role.
+
+### Added
+- **`src/single-agent.ts`** — single-agent mode module with:
+  - `buildSingleAgentTools()` — assembles all 15 tools from all subagent roles into one flat array
+  - `buildSingleAgentSystemPrompt()` — comprehensive 5-phase prompt (analysis → planning → implementation → self-review → fix iteration)
+  - `createSingleAgent()` — factory matching `createArchitect()` return shape
+  - `runSingleAgent()` — runner with phase detection from tool names, same `ArchitectResult` return type
+- **`src/context-compaction.ts`** — middleware that compacts old messages when total context chars exceed 80K:
+  - Preserves seed HumanMessage (index 0) and last 10 messages
+  - Truncates ToolMessage content and long AIMessage text/args in between
+  - Idempotent — detects already-compacted content and skips re-truncation
+  - Configurable: `maxTotalChars`, `maxToolResultChars`, `preserveRecentCount`
+- **`AGENT_MODE` env var** — `'multi'` (default) or `'single'`; documented in `.env.example`
+- **`agentMode`** field in config (`src/config.ts`)
+- 34 new tests — **15** in `tests/single-agent.test.ts` (system prompt, tool assembly, dry-run, context tools), **19** in `tests/context-compaction.test.ts` (threshold gating, truncation, preservation, idempotency) — **673 tests total**
+
+### Changed
+- `runArchitect()` branches on `config.agentMode === 'single'` — dynamic import of `runSingleAgent()` keeps the module from loading when not needed
+- `AgentRole` type widened to `(string & {})` to accept model names as agent identifiers in usage tracking
+- Single-agent usage records show the LLM model name (e.g., `claude-sonnet-4-20250514`) instead of `'single-agent'`
+
+---
+
 ## v2.1.0 — 2026-02-16
 
 **Targeted File Reading & Diff Context Reduction.** Two efficiency improvements to reduce token waste during agent runs. The `read_repo_file` tool now accepts optional `startLine`/`endLine` parameters so agents can request just the lines they need instead of always fetching the first 500. The reviewer's diff tool now computes deltas — after the first review, subsequent reviews see only new/changed file sections instead of the full PR diff, saving significant tokens during multi-iteration review-fix cycles.

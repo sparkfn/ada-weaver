@@ -9,6 +9,8 @@ import type { PollRepository } from './poll-repository.js';
 import { FilePollRepository } from './poll-repository.js';
 import { UsageService } from './usage-service.js';
 import type { IssueContextRepository } from './issue-context-repository.js';
+import type { AgentProcess } from './process-manager.js';
+import type { ProcessRepository } from './process-repository.js';
 
 // ── Issue data interface ─────────────────────────────────────────────────────
 
@@ -306,7 +308,7 @@ async function fetchIssuesForPoll(
  * The Architect supervisor handles everything: issue understanding (Issuer),
  * implementation (Coder), and review (Reviewer). No separate triage phase needed.
  */
-export async function runPollCycle(config: Config, options: { noSave?: boolean; dryRun?: boolean; maxIssues?: number; maxToolCalls?: number; pollRepository?: PollRepository; repoId?: number; issueContextRepository?: IssueContextRepository } = {}): Promise<void> {
+export async function runPollCycle(config: Config, options: { noSave?: boolean; dryRun?: boolean; maxIssues?: number; maxToolCalls?: number; pollRepository?: PollRepository; repoId?: number; issueContextRepository?: IssueContextRepository; processRepository?: ProcessRepository } = {}): Promise<void> {
   const maxIssues = options.maxIssues ?? getMaxIssues(config);
   // Dry run implies no-save (never persist state when skipping writes)
   const skipSave = options.noSave || options.dryRun;
@@ -375,9 +377,10 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
     }
 
     console.log(`\n\u{1F3D7}\uFE0F  Processing issue #${issue.number}: ${issue.title}`);
+    const startTime = new Date().toISOString();
+    const processId = `poll-${issue.number}-${Date.now()}`;
     try {
       const usageService = new UsageService();
-      const processId = `poll-${issue.number}-${Date.now()}`;
       const result = await runArchitect(config, issue.number, {
         dryRun: options.dryRun,
         usageService,
@@ -386,6 +389,25 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
         repoId: options.repoId,
       });
       processedNumbers.push(issue.number);
+
+      // Persist as AgentProcess so it appears in the dashboard
+      if (options.processRepository) {
+        const proc: AgentProcess = {
+          id: processId,
+          type: 'analyze',
+          status: 'completed',
+          issueNumber: issue.number,
+          prNumber: result.prNumber ?? undefined,
+          prNumbers: result.prNumbers.length > 0 ? result.prNumbers : undefined,
+          owner: config.github.owner,
+          repo: config.github.repo,
+          startedAt: startTime,
+          completedAt: new Date().toISOString(),
+          outcome: result.outcome,
+          logs: [],
+        };
+        await options.processRepository.save(proc);
+      }
 
       // Record actions from the Architect result
       if (result.prNumber) {
@@ -406,6 +428,23 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
     } catch (error) {
       console.error(`\u{274C} Architect failed for issue #${issue.number}:`, error);
       processedNumbers.push(issue.number);
+
+      // Persist failed process so it appears in the dashboard
+      if (options.processRepository) {
+        const proc: AgentProcess = {
+          id: processId,
+          type: 'analyze',
+          status: 'failed',
+          issueNumber: issue.number,
+          owner: config.github.owner,
+          repo: config.github.repo,
+          startedAt: startTime,
+          completedAt: new Date().toISOString(),
+          error: error instanceof Error ? error.message : String(error),
+          logs: [],
+        };
+        await options.processRepository.save(proc);
+      }
     }
   }
 

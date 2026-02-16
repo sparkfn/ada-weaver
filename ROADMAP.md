@@ -178,6 +178,7 @@ Incremental improvements after the v1.0.0 milestone. These are not new phases �
 | v1.9.0 | Conversation pruning — compress old iteration messages to reduce context bloat during multi-cycle runs | ✓ v1.9.0 |
 | v1.10.0 | Unified process tracking — all runs (poll, webhook, dashboard) create AgentProcess records; History tab removed | ✓ v1.10.0 |
 | v2.0.0 | Issue context system — shared agent memory, cross-run learning, restricted parallel delegation | ✓ v2.0.0 |
+| v2.1.0 | Targeted file reading (`startLine`/`endLine`) & diff context reduction (delta diffs for reviewer) | ✓ v2.1.0 |
 
 ---
 

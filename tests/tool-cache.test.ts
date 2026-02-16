@@ -5,9 +5,12 @@ import {
   ToolCache,
   wrapWithCache,
   wrapWriteWithInvalidation,
+  wrapDiffWithDelta,
   readFileKey,
   listFilesKey,
   prDiffKey,
+  parseDiffIntoFiles,
+  computeDiffDelta,
 } from '../src/tool-cache.js';
 import { ToolCallCounter, wrapWithCircuitBreaker } from '../src/github-tools.js';
 
@@ -306,5 +309,264 @@ describe('cache + circuit breaker integration', () => {
     expect(result).toBe('cached-data');
     expect(handler).not.toHaveBeenCalled();
     expect(counter.getCount()).toBe(1); // circuit breaker did count
+  });
+});
+
+// ── readFileKey with line ranges ──────────────────────────────────────────────
+
+describe('readFileKey with line ranges', () => {
+  it('returns undefined when startLine is set', () => {
+    expect(readFileKey({ path: 'src/a.ts', startLine: 10 })).toBeUndefined();
+  });
+
+  it('returns undefined when endLine is set', () => {
+    expect(readFileKey({ path: 'src/a.ts', endLine: 50 })).toBeUndefined();
+  });
+
+  it('returns undefined when both startLine and endLine are set', () => {
+    expect(readFileKey({ path: 'src/a.ts', startLine: 10, endLine: 50 })).toBeUndefined();
+  });
+
+  it('returns normal key when no range params', () => {
+    expect(readFileKey({ path: 'src/a.ts', branch: 'main' })).toBe('file:src/a.ts:main');
+  });
+});
+
+// ── wrapWithCache with undefined keys ─────────────────────────────────────────
+
+describe('wrapWithCache with undefined keys', () => {
+  it('skips cache when extractKey returns undefined', async () => {
+    const handler = vi.fn().mockResolvedValue('result');
+    const mockTool = createMockTool('read_repo_file', handler);
+    const cache = new ToolCache();
+
+    wrapWithCache(mockTool, cache, { extractKey: () => undefined });
+
+    const result = await mockTool.invoke({ path: 'a.ts' });
+    expect(result).toBe('result');
+    expect(handler).toHaveBeenCalledTimes(1);
+    // Should not count as hit or miss since cache was bypassed
+    expect(cache.getStats().hits).toBe(0);
+    expect(cache.getStats().misses).toBe(0);
+  });
+
+  it('does not store result when extractKey returns undefined', async () => {
+    const handler = vi.fn().mockResolvedValue('result');
+    const mockTool = createMockTool('read_repo_file', handler);
+    const cache = new ToolCache();
+
+    wrapWithCache(mockTool, cache, { extractKey: () => undefined });
+
+    await mockTool.invoke({ path: 'a.ts' });
+    expect(cache.getStats().size).toBe(0);
+  });
+});
+
+// ── parseDiffIntoFiles ────────────────────────────────────────────────────────
+
+describe('parseDiffIntoFiles', () => {
+  it('parses multi-file diff into per-file map', () => {
+    const diff = `diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1 +1 @@
+-old
++new
+diff --git a/src/b.ts b/src/b.ts
+--- a/src/b.ts
++++ b/src/b.ts
+@@ -1 +1 @@
+-old2
++new2`;
+
+    const files = parseDiffIntoFiles(diff);
+    expect(files.size).toBe(2);
+    expect(files.has('src/a.ts')).toBe(true);
+    expect(files.has('src/b.ts')).toBe(true);
+    expect(files.get('src/a.ts')).toContain('-old');
+    expect(files.get('src/b.ts')).toContain('-old2');
+  });
+
+  it('returns empty map for empty string', () => {
+    const files = parseDiffIntoFiles('');
+    expect(files.size).toBe(0);
+  });
+
+  it('handles single-file diff', () => {
+    const diff = `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new`;
+
+    const files = parseDiffIntoFiles(diff);
+    expect(files.size).toBe(1);
+    expect(files.has('README.md')).toBe(true);
+  });
+});
+
+// ── computeDiffDelta ──────────────────────────────────────────────────────────
+
+describe('computeDiffDelta', () => {
+  const fileASection = `diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1 +1 @@
+-old
++new`;
+
+  const fileBSection = `diff --git a/src/b.ts b/src/b.ts
+--- a/src/b.ts
++++ b/src/b.ts
+@@ -1 +1 @@
+-old2
++new2`;
+
+  const fileCSection = `diff --git a/src/c.ts b/src/c.ts
+--- /dev/null
++++ b/src/c.ts
+@@ -0,0 +1 @@
++brand new file`;
+
+  it('returns only new files when a file was added', () => {
+    const prev = fileASection;
+    const curr = `${fileASection}\n${fileCSection}`;
+    const delta = computeDiffDelta(prev, curr);
+
+    expect(delta).toContain('[DELTA DIFF');
+    expect(delta).toContain('// NEW FILE');
+    expect(delta).toContain('src/c.ts');
+    expect(delta).toContain('Unchanged files (omitted): src/a.ts');
+  });
+
+  it('returns only changed files when content differs', () => {
+    const prevA = fileASection;
+    const currAModified = fileASection.replace('-old', '-modified');
+    const delta = computeDiffDelta(prevA, currAModified);
+
+    expect(delta).toContain('// CHANGED');
+    expect(delta).toContain('src/a.ts');
+  });
+
+  it('omits unchanged files and lists them in header', () => {
+    const prev = `${fileASection}\n${fileBSection}`;
+    const curr = `${fileASection}\n${fileBSection}\n${fileCSection}`;
+    const delta = computeDiffDelta(prev, curr);
+
+    expect(delta).toContain('Unchanged files (omitted): src/a.ts, src/b.ts');
+    expect(delta).toContain('// NEW FILE');
+    expect(delta).toContain('src/c.ts');
+    // Should NOT contain the full diff for unchanged files
+    expect(delta).not.toContain('-old2');
+  });
+
+  it('returns "No changes" when diffs are identical', () => {
+    const delta = computeDiffDelta(fileASection, fileASection);
+    expect(delta).toContain('No changes since last review.');
+  });
+});
+
+// ── ToolCache.getPreviousDiff ─────────────────────────────────────────────────
+
+describe('ToolCache.getPreviousDiff', () => {
+  it('returns undefined when no previous diff exists', () => {
+    const cache = new ToolCache();
+    expect(cache.getPreviousDiff('diff:42')).toBeUndefined();
+  });
+
+  it('returns saved value after invalidateByPrefix on diff key', () => {
+    const cache = new ToolCache();
+    cache.set('diff:42', 'original-diff');
+    cache.invalidateByPrefix('diff:');
+
+    expect(cache.get('diff:42')).toBeUndefined(); // gone from store
+    expect(cache.getPreviousDiff('diff:42')).toBe('original-diff'); // saved
+  });
+
+  it('does not save non-diff keys as previous diffs', () => {
+    const cache = new ToolCache();
+    cache.set('file:a.ts:main', 'content');
+    cache.invalidateByPrefix('file:');
+
+    expect(cache.getPreviousDiff('file:a.ts:main')).toBeUndefined();
+  });
+});
+
+// ── wrapDiffWithDelta ─────────────────────────────────────────────────────────
+
+describe('wrapDiffWithDelta', () => {
+  it('first call returns full diff (no previous)', async () => {
+    const diff = `diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new`;
+    const handler = vi.fn().mockResolvedValue(diff);
+    const mockTool = createMockTool('get_pr_diff', handler);
+    const cache = new ToolCache();
+
+    wrapDiffWithDelta(mockTool, cache, { extractKey: (input) => `diff:${input.pull_number}` });
+
+    const result = await mockTool.invoke({ pull_number: 42 });
+    expect(result).toBe(diff); // full diff on first call
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('cache hit returns cached value', async () => {
+    const handler = vi.fn().mockResolvedValue('fresh-diff');
+    const mockTool = createMockTool('get_pr_diff', handler);
+    const cache = new ToolCache();
+
+    wrapDiffWithDelta(mockTool, cache, { extractKey: (input) => `diff:${input.pull_number}` });
+
+    await mockTool.invoke({ pull_number: 42 }); // miss → cache
+    const result = await mockTool.invoke({ pull_number: 42 }); // hit
+    expect(result).toBe('fresh-diff');
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('after invalidation + re-fetch, returns delta diff', async () => {
+    const origDiff = `diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new`;
+    const newDiff = `diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/src/b.ts b/src/b.ts\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+added`;
+
+    let callCount = 0;
+    const handler = vi.fn().mockImplementation(async () => {
+      callCount++;
+      return callCount === 1 ? origDiff : newDiff;
+    });
+    const mockTool = createMockTool('get_pr_diff', handler);
+    const cache = new ToolCache();
+
+    wrapDiffWithDelta(mockTool, cache, { extractKey: (input) => `diff:${input.pull_number}` });
+
+    // First call: full diff
+    const first = await mockTool.invoke({ pull_number: 42 });
+    expect(first).toBe(origDiff);
+
+    // Simulate write invalidation (what wrapWriteWithInvalidation does)
+    cache.invalidateByPrefix('diff:');
+
+    // Second call: should return delta
+    const second = await mockTool.invoke({ pull_number: 42 });
+    expect(second).toContain('[DELTA DIFF');
+    expect(second).toContain('// NEW FILE');
+    expect(second).toContain('src/b.ts');
+  });
+
+  it('error results are not delta-compared', async () => {
+    const origDiff = `diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new`;
+    let callCount = 0;
+    const handler = vi.fn().mockImplementation(async () => {
+      callCount++;
+      return callCount === 1 ? origDiff : 'Error fetching diff for PR #42: Not found';
+    });
+    const mockTool = createMockTool('get_pr_diff', handler);
+    const cache = new ToolCache();
+
+    wrapDiffWithDelta(mockTool, cache, { extractKey: (input) => `diff:${input.pull_number}` });
+
+    await mockTool.invoke({ pull_number: 42 });
+    cache.invalidateByPrefix('diff:');
+
+    const second = await mockTool.invoke({ pull_number: 42 });
+    expect(second).toContain('Error');
+    expect(second).not.toContain('[DELTA DIFF');
   });
 });

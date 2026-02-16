@@ -242,16 +242,6 @@ describe('Dashboard API', () => {
     });
   });
 
-  describe('GET /api/history', () => {
-    it('returns poll state', async () => {
-      const res = await inject(app, 'GET', '/api/history');
-      expect(res.status).toBe(200);
-      expect(res.body.lastPollIssueNumbers).toEqual([1, 2]);
-      expect(res.body.issues).toBeDefined();
-      expect(res.body.issues['1'].pr.number).toBe(5);
-    });
-  });
-
   describe('GET /api/processes (parallel fields)', () => {
     it('process response includes activePhases field when set', async () => {
       const proc = processManager.startAnalysis(42);

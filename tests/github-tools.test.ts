@@ -516,6 +516,130 @@ describe('createReadRepoFileTool', () => {
 
     expect(result).toContain('directory');
   });
+
+  it('returns targeted range with startLine and endLine', async () => {
+    const lines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
+    const content = lines.join('\n');
+    octokit.rest.repos.getContent.mockResolvedValue({
+      data: {
+        type: 'file',
+        path: 'big.ts',
+        size: content.length,
+        sha: 'abc',
+        content: Buffer.from(content).toString('base64'),
+        encoding: 'base64',
+      },
+    });
+
+    const toolFn = createReadRepoFileTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ path: 'big.ts', startLine: 10, endLine: 15 }));
+
+    expect(result.startLine).toBe(10);
+    expect(result.endLine).toBe(15);
+    expect(result.total_lines).toBe(200);
+    const returnedLines = result.content.split('\n');
+    expect(returnedLines).toHaveLength(6); // lines 10-15 inclusive
+    expect(returnedLines[0]).toBe('line 10');
+    expect(returnedLines[5]).toBe('line 15');
+  });
+
+  it('returns from startLine to end when only startLine given', async () => {
+    const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+    const content = lines.join('\n');
+    octokit.rest.repos.getContent.mockResolvedValue({
+      data: {
+        type: 'file',
+        path: 'small.ts',
+        size: content.length,
+        sha: 'abc',
+        content: Buffer.from(content).toString('base64'),
+        encoding: 'base64',
+      },
+    });
+
+    const toolFn = createReadRepoFileTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ path: 'small.ts', startLine: 18 }));
+
+    expect(result.startLine).toBe(18);
+    expect(result.endLine).toBe(20);
+    expect(result.total_lines).toBe(20);
+    const returnedLines = result.content.split('\n');
+    expect(returnedLines).toHaveLength(3); // lines 18-20
+    expect(returnedLines[0]).toBe('line 18');
+  });
+
+  it('returns from beginning to endLine when only endLine given', async () => {
+    const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+    const content = lines.join('\n');
+    octokit.rest.repos.getContent.mockResolvedValue({
+      data: {
+        type: 'file',
+        path: 'small.ts',
+        size: content.length,
+        sha: 'abc',
+        content: Buffer.from(content).toString('base64'),
+        encoding: 'base64',
+      },
+    });
+
+    const toolFn = createReadRepoFileTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ path: 'small.ts', endLine: 3 }));
+
+    expect(result.startLine).toBe(1);
+    expect(result.endLine).toBe(3);
+    expect(result.total_lines).toBe(20);
+    const returnedLines = result.content.split('\n');
+    expect(returnedLines).toHaveLength(3); // lines 1-3
+    expect(returnedLines[0]).toBe('line 1');
+    expect(returnedLines[2]).toBe('line 3');
+  });
+
+  it('includes metadata in line-range response', async () => {
+    const lines = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`);
+    const content = lines.join('\n');
+    octokit.rest.repos.getContent.mockResolvedValue({
+      data: {
+        type: 'file',
+        path: 'src/app.ts',
+        size: content.length,
+        sha: 'xyz',
+        content: Buffer.from(content).toString('base64'),
+        encoding: 'base64',
+      },
+    });
+
+    const toolFn = createReadRepoFileTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ path: 'src/app.ts', startLine: 50, endLine: 60 }));
+
+    expect(result.path).toBe('src/app.ts');
+    expect(result.sha).toBe('xyz');
+    expect(result.startLine).toBe(50);
+    expect(result.endLine).toBe(60);
+    expect(result.total_lines).toBe(100);
+    // Should NOT have truncated flag (line range is explicit)
+    expect(result.truncated).toBeUndefined();
+  });
+
+  it('truncation note mentions startLine/endLine', async () => {
+    const lines = Array.from({ length: 600 }, (_, i) => `line ${i + 1}`);
+    const content = lines.join('\n');
+    octokit.rest.repos.getContent.mockResolvedValue({
+      data: {
+        type: 'file',
+        path: 'huge.ts',
+        size: content.length,
+        sha: 'def',
+        content: Buffer.from(content).toString('base64'),
+        encoding: 'base64',
+      },
+    });
+
+    const toolFn = createReadRepoFileTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ path: 'huge.ts' }));
+
+    expect(result.truncated).toBe(true);
+    expect(result.note).toContain('startLine/endLine');
+  });
 });
 
 // ── Dry-run tool wrappers ───────────────────────────────────────────────────

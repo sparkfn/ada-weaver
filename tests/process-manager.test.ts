@@ -11,13 +11,8 @@ vi.mock('../src/reviewer-agent.js', () => ({
   runReviewSingle: vi.fn(),
 }));
 
-vi.mock('../src/core.js', () => ({
-  loadPollState: vi.fn(),
-}));
-
 import { runArchitect } from '../src/architect.js';
 import { runReviewSingle } from '../src/reviewer-agent.js';
-import { loadPollState } from '../src/core.js';
 
 const mockConfig = {
   github: { owner: 'test-owner', repo: 'test-repo', token: 'fake' },
@@ -265,26 +260,6 @@ describe('ProcessManager', () => {
 
     it('returns undefined for unknown ID', async () => {
       expect(await pm.getProcess('unknown')).toBeUndefined();
-    });
-  });
-
-  describe('getHistory', () => {
-    it('delegates to loadPollState', () => {
-      const mockState = {
-        lastPollTimestamp: '2024-01-01T00:00:00.000Z',
-        lastPollIssueNumbers: [1, 2],
-        issues: {},
-      };
-      vi.mocked(loadPollState).mockReturnValue(mockState);
-
-      const result = pm.getHistory();
-      expect(result).toEqual(mockState);
-      expect(loadPollState).toHaveBeenCalled();
-    });
-
-    it('returns null when no poll state exists', () => {
-      vi.mocked(loadPollState).mockReturnValue(null);
-      expect(pm.getHistory()).toBeNull();
     });
   });
 

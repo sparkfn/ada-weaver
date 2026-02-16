@@ -273,6 +273,9 @@
           ? h(Alert, { severity: 'error', sx: { mt: 2 } }, proc.error)
           : null,
 
+        h(Typography, { variant: 'subtitle2', sx: { mt: 2 } }, 'Token Usage'),
+        h(ProcessUsage, { processId: proc.id }),
+
         h(Typography, { variant: 'subtitle2', sx: { mt: 2 } }, 'Live Logs'),
         h(LiveLogs, { logs, fullPage }),
 
@@ -421,54 +424,6 @@
       const m = Math.floor(s / 60);
       const rem = s % 60;
       return rem ? `${m}m ${rem}s` : `${m}m`;
-    }
-
-    // ── HistoryPanel ───────────────────────────────────────────────────────────
-
-    function HistoryPanel({ history }) {
-      if (!history || !history.issues || Object.keys(history.issues).length === 0) {
-        return h(Box, { sx: { p: 4, textAlign: 'center' } },
-          h(Typography, { color: 'text.secondary' }, 'No history found. Run some analyses first.')
-        );
-      }
-
-      const entries = Object.entries(history.issues);
-
-      return h(TableContainer, { component: Paper, sx: { background: '#16213e' } },
-        h(Table, { size: 'small' },
-          h(TableHead, null,
-            h(TableRow, null,
-              h(TableCell, null, 'Issue #'),
-              h(TableCell, null, 'Branch'),
-              h(TableCell, null, 'PR'),
-              h(TableCell, null, 'Commits'),
-              h(TableCell, null, 'Comment'),
-            ),
-          ),
-          h(TableBody, null,
-            entries.map(([num, actions]) =>
-              h(TableRow, { key: num },
-                h(TableCell, null, `#${num}`),
-                h(TableCell, null,
-                  actions.branch ? h(Chip, { label: actions.branch.name, size: 'small', variant: 'outlined' }) : '\u2014'
-                ),
-                h(TableCell, null,
-                  actions.pr
-                    ? h('a', {
-                        href: actions.pr.html_url || '#',
-                        target: '_blank',
-                        rel: 'noopener',
-                        style: { color: '#7c4dff', textDecoration: 'none' },
-                      }, `#${actions.pr.number}`)
-                    : '\u2014'
-                ),
-                h(TableCell, null, actions.commits ? actions.commits.length : 0),
-                h(TableCell, null, actions.comment ? 'Yes' : '\u2014'),
-              )
-            ),
-          ),
-        ),
-      );
     }
 
     // ── NewProcessDialog ───────────────────────────────────────────────────────
@@ -659,6 +614,42 @@
       );
     }
 
+    // ── ProcessUsage (reusable per-process/issue usage display) ────────────────
+
+    function ProcessUsage({ processId, issueNumber }) {
+      const [summary, setSummary] = useState(null);
+      const [agentGroups, setAgentGroups] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        const qs = processId ? `processId=${processId}` : `issueNumber=${issueNumber}`;
+        setLoading(true);
+        Promise.all([
+          fetch(`/api/usage/summary?${qs}`).then(r => r.json()),
+          fetch(`/api/usage/group/agent?${qs}`).then(r => r.json()),
+        ]).then(([sum, agents]) => {
+          setSummary(sum);
+          setAgentGroups(agents);
+        }).catch(() => {}).finally(() => setLoading(false));
+      }, [processId, issueNumber]);
+
+      if (loading) return h(Box, { sx: { py: 2, textAlign: 'center' } }, h(CircularProgress, { size: 20 }));
+
+      if (!summary || summary.totalRecords === 0) {
+        return h(Typography, { variant: 'body2', color: 'text.secondary', sx: { mt: 1 } }, 'No usage data recorded');
+      }
+
+      return h(Box, { sx: { mt: 1 } },
+        h(Box, { sx: { display: 'flex', gap: 1.5, mb: 2, flexWrap: 'wrap' } },
+          h(SummaryCard, { label: 'Total Tokens', value: formatNumber(summary.totalTokens), sx: { p: 1.5 } }),
+          h(SummaryCard, { label: 'Input', value: formatNumber(summary.totalInputTokens), sx: { p: 1.5 } }),
+          h(SummaryCard, { label: 'Output', value: formatNumber(summary.totalOutputTokens), sx: { p: 1.5 } }),
+          h(SummaryCard, { label: 'Cost', value: formatCost(summary.totalEstimatedCost), sx: { p: 1.5 } }),
+        ),
+        h(UsageGroupTable, { title: 'By Agent', groups: agentGroups }),
+      );
+    }
+
     // ── RecentCallsTable ───────────────────────────────────────────────────────
 
     function RecentCallsTable({ records }) {
@@ -764,7 +755,6 @@
 
     function App() {
       const [processes, setProcesses] = useState([]);
-      const [history, setHistory] = useState(null);
       const [status, setStatus] = useState(null);
       const [tab, setTab] = useState(0);
       const [selectedProc, setSelectedProc] = useState(null);
@@ -778,7 +768,6 @@
       useEffect(() => {
         fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {});
         fetch('/api/processes').then(r => r.json()).then(setProcesses).catch(() => {});
-        fetch('/api/history').then(r => r.json()).then(setHistory).catch(() => {});
       }, []);
 
       // SSE connection with auto-reconnect
@@ -951,14 +940,11 @@
             : h(Fragment, null,
                 h(Tabs, { value: tab, onChange: (_, v) => setTab(v), sx: { mb: 2 } },
                   h(Tab, { label: 'Processes' }),
-                  h(Tab, { label: 'History' }),
                   h(Tab, { label: 'Usage' }),
                 ),
                 tab === 0
                   ? h(ProcessesTable, { processes, onSelect: handleSelect, onCancel: handleCancel })
-                  : tab === 1
-                    ? h(HistoryPanel, { history })
-                    : h(UsagePanel, { refreshKey: usageRefreshKey }),
+                  : h(UsagePanel, { refreshKey: usageRefreshKey }),
               ),
         ),
 

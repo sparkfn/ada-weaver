@@ -409,6 +409,7 @@ async function main() {
         pollRepository: pollRepos.pollRepository,
         repoId: pollRepos.repoId,
         issueContextRepository: pollRepos.issueContextRepository,
+        processRepository: pollRepos.processRepository,
       });
       break;
     }

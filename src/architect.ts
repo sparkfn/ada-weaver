@@ -28,7 +28,7 @@ import {
 import { formatDuration, logAgentEvent, logAgentDetail, logDiff } from './logger.js';
 import { createIterationPruningMiddleware } from './context-pruning.js';
 import { buildReviewerSystemPrompt } from './reviewer-agent.js';
-import { ToolCache, wrapWithCache, wrapWriteWithInvalidation, readFileKey, listFilesKey, prDiffKey } from './tool-cache.js';
+import { ToolCache, wrapWithCache, wrapWriteWithInvalidation, wrapDiffWithDelta, readFileKey, listFilesKey, prDiffKey } from './tool-cache.js';
 import { findPrForIssue, findAllPrsForIssue } from './core.js';
 import type { Octokit } from 'octokit';
 import type { ProgressUpdate } from './process-manager.js';
@@ -481,7 +481,7 @@ export function createReviewerSubagent(
   let readTool = createReadRepoFileTool(owner, repo, octokit);
 
   if (cache) {
-    diffTool = wrapWithCache(diffTool, cache, { extractKey: prDiffKey });
+    diffTool = wrapDiffWithDelta(diffTool, cache, { extractKey: prDiffKey });
     listTool = wrapWithCache(listTool, cache, { extractKey: listFilesKey });
     readTool = wrapWithCache(readTool, cache, { extractKey: readFileKey });
   }

@@ -3,7 +3,6 @@ import type { Config } from './config.js';
 import { runArchitect } from './architect.js';
 import type { ContinueContext } from './architect.js';
 import { runReviewSingle } from './reviewer-agent.js';
-import { loadPollState } from './core.js';
 import type { UsageService } from './usage-service.js';
 import type { ProcessRepository } from './process-repository.js';
 import type { IssueContextRepository } from './issue-context-repository.js';
@@ -214,10 +213,6 @@ export class ProcessManager extends EventEmitter {
     }
 
     return undefined;
-  }
-
-  getHistory() {
-    return loadPollState();
   }
 
   private interceptConsole(proc: AgentProcess): () => void {

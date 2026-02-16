@@ -338,7 +338,7 @@ export function createListRepoFilesTool(owner: string, repo: string, octokit: Oc
 
 export function createReadRepoFileTool(owner: string, repo: string, octokit: Octokit) {
   return tool(
-    async ({ path, branch = 'main' }: { path: string; branch?: string }) => {
+    async ({ path, branch = 'main', startLine, endLine }: { path: string; branch?: string; startLine?: number; endLine?: number }) => {
       try {
         console.log(`\u{1F4D6} Reading ${path} from ${owner}/${repo} (${branch})...`);
         const { data } = await withRetry(() => octokit.rest.repos.getContent({ owner, repo, path, ref: branch }));
@@ -354,6 +354,16 @@ export function createReadRepoFileTool(owner: string, repo: string, octokit: Oct
         const fullContent = Buffer.from(data.content, 'base64').toString('utf-8');
         const MAX_LINES = 500;
         const lines = fullContent.split('\n');
+
+        // Apply line range if specified
+        if (startLine !== undefined || endLine !== undefined) {
+          const start = Math.max(0, (startLine ?? 1) - 1);  // 1-indexed → 0-indexed
+          const end = endLine !== undefined ? Math.min(lines.length, endLine) : lines.length;
+          const rangeLines = lines.slice(start, end);
+          const result = { path: data.path, size: data.size, sha: data.sha, content: rangeLines.join('\n'), startLine: start + 1, endLine: end, total_lines: lines.length };
+          return JSON.stringify(result, null, 2);
+        }
+
         const truncated = lines.length > MAX_LINES;
         const content = truncated ? lines.slice(0, MAX_LINES).join('\n') : fullContent;
         const result: Record<string, unknown> = { path: data.path, size: data.size, sha: data.sha, content };
@@ -361,7 +371,7 @@ export function createReadRepoFileTool(owner: string, repo: string, octokit: Oct
           result.truncated = true;
           result.total_lines = lines.length;
           result.shown_lines = MAX_LINES;
-          result.note = `File has ${lines.length} lines. Only the first ${MAX_LINES} are shown. Use list_repo_files to find smaller, more targeted files.`;
+          result.note = `File has ${lines.length} lines. Only the first ${MAX_LINES} are shown. Use startLine/endLine to read a specific range.`;
         }
         return JSON.stringify(result, null, 2);
       } catch (error) {
@@ -370,10 +380,12 @@ export function createReadRepoFileTool(owner: string, repo: string, octokit: Oct
     },
     {
       name: 'read_repo_file',
-      description: 'Read the contents of a single file from the repository. Returns the file content as text. Files over 500 lines are truncated. Use list_repo_files first to find the correct file path. Limited to files under 1MB.',
+      description: 'Read the contents of a single file from the repository. Supports optional startLine/endLine for targeted reading. Files over 500 lines are truncated when no range is specified.',
       schema: z.object({
         path: z.string().describe('Full path to the file in the repo (e.g., "src/index.ts", "README.md")'),
         branch: z.string().optional().default('main').describe('Branch to read from (default: main)'),
+        startLine: z.number().optional().describe('First line to return (1-indexed). Omit to start from beginning.'),
+        endLine: z.number().optional().describe('Last line to return (1-indexed, inclusive). Omit to read to end (up to 500 lines).'),
       }),
     }
   );

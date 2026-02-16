@@ -9,6 +9,27 @@
 
 ---
 
+## v2.1.0 — 2026-02-16
+
+**Targeted File Reading & Diff Context Reduction.** Two efficiency improvements to reduce token waste during agent runs. The `read_repo_file` tool now accepts optional `startLine`/`endLine` parameters so agents can request just the lines they need instead of always fetching the first 500. The reviewer's diff tool now computes deltas — after the first review, subsequent reviews see only new/changed file sections instead of the full PR diff, saving significant tokens during multi-iteration review-fix cycles.
+
+### Added
+- **`startLine`/`endLine` params** on `read_repo_file` — 1-indexed, inclusive range; response includes `startLine`, `endLine`, `total_lines` metadata
+- **`parseDiffIntoFiles()`** in `src/tool-cache.ts` — splits a unified diff into per-file sections keyed by filename
+- **`computeDiffDelta()`** in `src/tool-cache.ts` — compares two diffs and returns only NEW or CHANGED file sections with a summary header
+- **`wrapDiffWithDelta()`** in `src/tool-cache.ts` — wraps the diff tool with delta computation; first call returns full diff, subsequent calls after cache invalidation return only the delta
+- **`previousDiffs`** map on `ToolCache` — auto-saves diff values before `invalidateByPrefix` deletes them, enabling delta computation
+- **`getPreviousDiff()`** method on `ToolCache` — retrieves the pre-invalidation diff for a key
+- 30 new tests — **586 tests total** (9 in github-tools.test.ts, 21 in tool-cache.test.ts)
+
+### Changed
+- `readFileKey()` returns `undefined` for line-range reads (not cacheable — different ranges for same file)
+- `wrapWithCache()` accepts `string | undefined` from `extractKey` — skips caching when `undefined`
+- Reviewer's diff tool uses `wrapDiffWithDelta` instead of `wrapWithCache` in `createReviewerSubagent()`
+- Truncation note on large files now mentions `startLine/endLine` instead of `list_repo_files`
+
+---
+
 ## v2.0.0 — 2026-02-16
 
 **Issue Context System — Shared Memory for Agents.** Adds a shared `issue_context` table that acts like a Jira ticket: all agents read from and write to it, eliminating the "telephone game" where the Architect paraphrases each agent's output. Sub-agents can now read each other's raw analysis, plans, and feedback directly. Enables cross-run learning from past issues via file overlap search. Also restricts parallel coder delegation to prevent duplicate PRs and wasted tokens.

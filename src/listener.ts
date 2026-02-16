@@ -10,6 +10,8 @@ import { createGitHubClient, getAuthFromConfig } from './github-tools.js';
 import { runReviewSingle } from './reviewer-agent.js';
 import { chat, chatStream } from './chat-agent.js';
 import { UsageService } from './usage-service.js';
+import type { AgentProcess } from './process-manager.js';
+import type { ProcessRepository } from './process-repository.js';
 
 /**
  * Webhook listener configuration.
@@ -170,7 +172,7 @@ export interface IssueHandlerResult {
  * (Issuer → Coder → Reviewer) via runArchitect. Runs async (fire-and-forget)
  * so the webhook endpoint can return 200 immediately.
  */
-export async function handleIssuesEvent(event: WebhookEvent, config?: Config): Promise<IssueHandlerResult> {
+export async function handleIssuesEvent(event: WebhookEvent, config?: Config, processRepository?: ProcessRepository): Promise<IssueHandlerResult> {
   const { payload } = event;
 
   if (payload.action !== 'opened') {
@@ -229,9 +231,10 @@ export async function handleIssuesEvent(event: WebhookEvent, config?: Config): P
     console.warn(`[webhook] Sub-issue context check failed for #${issueNumber}: ${e}`);
   }
 
+  const startTime = new Date().toISOString();
+  const processId = `webhook-${issueNumber}-${Date.now()}`;
   try {
     const usageService = new UsageService();
-    const processId = `webhook-${issueNumber}-${Date.now()}`;
     const result = await runArchitect(config, issueNumber, { usageService, processId });
     if (result.prNumbers.length > 1) {
       console.log(
@@ -244,8 +247,44 @@ export async function handleIssuesEvent(event: WebhookEvent, config?: Config): P
         `${result.prNumber ? `, PR #${result.prNumber}` : ''}`,
       );
     }
+
+    // Persist as AgentProcess so it appears in the dashboard
+    if (processRepository) {
+      const proc: AgentProcess = {
+        id: processId,
+        type: 'analyze',
+        status: 'completed',
+        issueNumber,
+        prNumber: result.prNumber ?? undefined,
+        prNumbers: result.prNumbers.length > 0 ? result.prNumbers : undefined,
+        owner: config.github.owner,
+        repo: config.github.repo,
+        startedAt: startTime,
+        completedAt: new Date().toISOString(),
+        outcome: result.outcome,
+        logs: [],
+      };
+      await processRepository.save(proc);
+    }
   } catch (err) {
     console.error(`[webhook] Architect failed for issue #${issueNumber}:`, err);
+
+    // Persist failed process so it appears in the dashboard
+    if (processRepository) {
+      const proc: AgentProcess = {
+        id: processId,
+        type: 'analyze',
+        status: 'failed',
+        issueNumber,
+        owner: config.github.owner,
+        repo: config.github.repo,
+        startedAt: startTime,
+        completedAt: new Date().toISOString(),
+        error: err instanceof Error ? err.message : String(err),
+        logs: [],
+      };
+      await processRepository.save(proc);
+    }
   }
 
   return { handled: true, issueNumber, reason: 'Analysis triggered' };
@@ -379,7 +418,7 @@ export async function handleIssueCommentEvent(event: WebhookEvent, config?: Conf
  * Dispatch a parsed webhook event to the appropriate handler.
  * Config is optional — when provided, issues.opened events trigger analysis.
  */
-export function handleWebhookEvent(event: WebhookEvent, config?: Config): void {
+export function handleWebhookEvent(event: WebhookEvent, config?: Config, processRepository?: ProcessRepository): void {
   if (event.event === 'pull_request') {
     // Fire-and-forget — don't await, just log errors
     handlePullRequestEvent(event, config).catch((err) => {
@@ -390,7 +429,7 @@ export function handleWebhookEvent(event: WebhookEvent, config?: Config): void {
 
   if (event.event === 'issues') {
     // Fire-and-forget — don't await, just log errors
-    handleIssuesEvent(event, config).catch((err) => {
+    handleIssuesEvent(event, config, processRepository).catch((err) => {
       console.error(`[webhook] Issues handler error:`, err);
     });
     return;

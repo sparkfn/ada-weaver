@@ -160,16 +160,6 @@ export function createDashboardApp(config: Config, options?: DashboardOptions): 
     res.json({ cancelled: true });
   });
 
-  // History from last_poll.json
-  app.get('/api/history', (_req: Request, res: Response) => {
-    const state = processManager.getHistory();
-    if (!state) {
-      res.json({ issues: {}, lastPollTimestamp: null, lastPollIssueNumbers: [] });
-      return;
-    }
-    res.json(state);
-  });
-
   // ── Usage API endpoints ─────────────────────────────────────────────────────
 
   // Usage summary
@@ -306,7 +296,15 @@ export function createUnifiedApp(config: Config, options?: DashboardOptions): { 
     res.status(200).json({ received: true, event, deliveryId: webhookEvent.deliveryId });
 
     try {
-      handleWebhookEvent(webhookEvent, config);
+      // Route issues.opened through ProcessManager for full tracking + SSE
+      if (event === 'issues' && action === 'opened') {
+        const issue = payload.issue as any;
+        if (issue?.number) {
+          processManager.startAnalysis(issue.number);
+        }
+      } else {
+        handleWebhookEvent(webhookEvent, config);
+      }
     } catch (err) {
       console.error(`[webhook] Handler error for ${event}.${action}:`, err);
     }

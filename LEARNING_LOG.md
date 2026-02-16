@@ -6273,3 +6273,54 @@ When `contextRepo` is `undefined` (e.g., older code paths), everything works as 
 - **Entry 54** (Shared File Cache): Cache reduces API calls within a run; context reduces information loss between agents within a run and across runs. Complementary optimizations.
 - **Entry 55** (Conversation Pruning): Pruning reduces stale context in the LLM's message history; the context system provides an external memory that persists independently of the message stream.
 - **Entry 49** (Parallel Subagents): The parallel execution feature is now restricted to sub-issue scenarios only, fixing a real production issue with duplicate PRs.
+
+## Entry 58: Targeted File Reading & Diff Context Reduction (v2.1.0)
+
+**Date:** 2026-02-16
+**Author:** Architect Agent
+
+### The problem
+
+Two sources of token waste in the agent pipeline:
+
+1. **Whole-file reads**: The `read_repo_file` tool always returns the first 500 lines. Agents often only need a specific function or block (e.g., lines 100-150). Every read wastes tokens on irrelevant lines above and below the target.
+
+2. **Full diff re-fetching**: During review-fix iteration cycles (Coder writes → Reviewer reviews → Coder fixes → Reviewer re-reviews), the Reviewer re-fetches the full PR diff each time. After the first review, only the delta (new/changed files) matters. Sending the unchanged files again wastes context.
+
+### Solution 1: Targeted file reading with `startLine`/`endLine`
+
+Added optional `startLine` and `endLine` parameters to the `read_repo_file` tool schema. Both are 1-indexed and inclusive. The response includes `startLine`, `endLine`, and `total_lines` metadata so agents know where they are in the file.
+
+The cache interaction is important: line-range reads bypass the cache entirely. `readFileKey()` returns `undefined` when either parameter is set, and `wrapWithCache()` was updated to accept `string | undefined` keys — when `undefined`, it calls the original function directly without checking or storing in cache. This is correct because different ranges of the same file shouldn't share a cache entry, and full-file reads should still be cached normally.
+
+### Solution 2: Diff delta computation
+
+Three new utilities in `tool-cache.ts`:
+
+- **`parseDiffIntoFiles(diff)`** — splits a unified diff string on `diff --git` boundaries into a `Map<filename, section>`. Each section is trimmed to avoid false inequality from trailing whitespace.
+- **`computeDiffDelta(previousDiff, currentDiff)`** — compares two parsed diffs file-by-file. Files present in `currentDiff` but not `previousDiff` are marked `// NEW FILE`. Files present in both but with different content are marked `// CHANGED`. Identical files are listed in the header as "Unchanged files (omitted)". If nothing changed, returns "No changes since last review."
+- **`wrapDiffWithDelta(tool, cache, opts)`** — replaces `wrapWithCache` for the reviewer's diff tool. On first call (no `previousDiff`), it behaves identically to `wrapWithCache`. On subsequent calls after cache invalidation, it retrieves the pre-invalidation diff from `ToolCache.previousDiffs` and returns the delta instead.
+
+The `ToolCache.invalidateByPrefix()` method was extended to auto-save diff values before deletion:
+
+```typescript
+if (key.startsWith('diff:')) {
+  this.previousDiffs.set(key, this.store.get(key)!);
+}
+```
+
+This means the delta is computed transparently — the reviewer just calls `get_pr_diff` as before, but on second+ reviews gets a much smaller response.
+
+### Design decisions
+
+**Why not cache line-range reads?** Different ranges of the same file have different cache keys, and the combinatorial space is large (any start/end pair). Caching them would bloat the store without meaningful hit rates. Better to just bypass cache for these targeted reads.
+
+**Why trimEnd() in parseDiffIntoFiles?** When splitting a multi-file diff on `diff --git` boundaries, the section before the split point retains its trailing newline. Without trimming, identical file sections in two diffs would compare as different due to whitespace. This caused two test failures before the fix.
+
+**Why save previousDiffs on prefix invalidation, not individual invalidation?** The `invalidateByPrefix('diff:')` call in `wrapWriteWithInvalidation` is the only path that invalidates diff entries — it's called after every file write. Individual `invalidate(key)` is never called on diff keys in the current code. If that changes, the individual `invalidate()` method would need the same treatment.
+
+### Connections to previous entries
+
+- **Entry 54** (Shared File Cache): This builds directly on the cache infrastructure. `wrapDiffWithDelta` is a specialized variant of `wrapWithCache` that adds delta computation. The `previousDiffs` map lives on the same `ToolCache` class.
+- **Entry 55** (Conversation Pruning): Pruning reduces stale messages in the LLM's context window; delta diffs reduce the size of new messages injected into the context. Both reduce input tokens but at different layers.
+- **Entry 10** (`read_repo_file` implementation): The original 500-line truncation was the only control over file read size. `startLine`/`endLine` gives agents fine-grained control without changing the truncation behavior for unparameterized reads.

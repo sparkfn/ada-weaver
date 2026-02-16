@@ -5,6 +5,17 @@ import path from 'path';
 import { execSync } from 'child_process';
 import type { Workspace } from './workspace.js';
 
+// ── Output caps ──────────────────────────────────────────────────────────────
+
+const MAX_BASH_OUTPUT = 8_000;
+const MAX_GREP_OUTPUT = 8_000;
+
+function truncateOutput(output: string, maxChars: number, label: string): string {
+  if (output.length <= maxChars) return output;
+  return output.slice(0, maxChars) +
+    `\n[... ${label} output truncated at ${maxChars} chars (original: ${output.length} chars)]`;
+}
+
 // ── Path safety ──────────────────────────────────────────────────────────────
 
 /**
@@ -169,7 +180,7 @@ export function createLocalGrepTool(ws: Workspace) {
           }
           return line;
         });
-        return lines.join('\n');
+        return truncateOutput(lines.join('\n'), MAX_GREP_OUTPUT, 'grep');
       } catch (err: any) {
         // grep returns exit code 1 when no matches
         if (err.status === 1) return 'No matches found.';
@@ -270,15 +281,15 @@ export function createLocalBashTool(ws: Workspace) {
           encoding: 'utf-8',
           env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
         });
-        return result || '(no output)';
+        return truncateOutput(result || '(no output)', MAX_BASH_OUTPUT, 'bash');
       } catch (err: any) {
         const stdout = err.stdout?.toString() || '';
         const stderr = err.stderr?.toString() || '';
         const output = [stdout, stderr].filter(Boolean).join('\n');
         if (err.killed) {
-          return `Error: command timed out after 30 seconds.\n${output}`;
+          return truncateOutput(`Error: command timed out after 30 seconds.\n${output}`, MAX_BASH_OUTPUT, 'bash');
         }
-        return `Error (exit code ${err.status ?? 'unknown'}):\n${output}`;
+        return truncateOutput(`Error (exit code ${err.status ?? 'unknown'}):\n${output}`, MAX_BASH_OUTPUT, 'bash');
       }
     },
     {

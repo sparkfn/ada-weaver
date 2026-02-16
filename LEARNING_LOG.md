@@ -6400,3 +6400,61 @@ This complements the iteration pruning middleware (Entry 55) — both are applie
 - **Entry 46** (Architect Supervisor): The single-agent mode is an alternative to the Architect pattern. Same entry point (`runArchitect`), same result type, same callers — but instead of supervisor → subagent delegation, one agent does everything sequentially.
 - **Entry 55** (Conversation Pruning): Both middlewares reduce context size but at different layers. Pruning is iteration-aware; compaction is size-aware. The single agent uses both.
 - **Entry 57** (Issue Context System): Context tools are included in the single agent's toolkit. The agent can still save/read shared context, but the primary benefit (avoiding information loss between agents) is less critical when there's only one agent.
+
+## Entry 60: Tool Output Context Management — Two-Layer Defense (v2.4.0)
+
+**Date:** 2026-02-16
+**Author:** Architect Agent
+
+### The problem
+
+Tool outputs go directly into the LLM context with no universal size cap. The `bash` tool has zero output limit — a single `cat` of a large file could dump megabytes into context. The `grep` tool has a 100-match limit but no character cap — 100 matches of long lines can still be enormous. The `fetch_github_issues` tool includes full issue bodies (unbounded), and `check_ci_status` includes unbounded `output_summary` fields from CI check runs. One bad tool call can consume most of the context window, causing either truncation of important earlier context or outright failure.
+
+This is especially dangerous in the single-agent mode (Entry 59), where a single context window accumulates all tool outputs across 5 phases.
+
+### Solution: Two-layer defense
+
+**Layer 1 — Tool-level caps**: Truncate inside the 4 worst-offender tools before output leaves the handler.
+
+| Tool | Cap | File | Why this value |
+|------|-----|------|----------------|
+| `bash` | 8,000 chars | `local-tools.ts` | Covers typical test output; large logs get truncated |
+| `grep` | 8,000 chars | `local-tools.ts` | 100 matches of ~80 char lines ≈ 8K |
+| Issue bodies | 2,000 chars | `github-tools.ts` | Most issue descriptions fit; only mega-issues get truncated |
+| CI summaries | 1,000 chars | `github-tools.ts` | CI summaries are diagnostic — first 1K is usually enough |
+
+Each truncation appends a note: `[... bash output truncated at 8000 chars (original: 15234 chars)]` so the LLM knows data was lost and can use more targeted queries.
+
+**Layer 2 — Universal safety-net wrapper**: `wrapWithOutputCap()` applied as the outermost wrapper at all tool assembly points.
+
+```typescript
+export function wrapWithOutputCap<T extends ReturnType<typeof tool>>(
+  wrappedTool: T,
+  maxChars: number = DEFAULT_OUTPUT_CAP,  // 10,000
+): T
+```
+
+Applied via `.map(t => wrapWithOutputCap(t))` at 5 assembly points:
+1. Issuer tools (architect.ts)
+2. Coder tools (architect.ts)
+3. Reviewer tools (architect.ts)
+4. Architect tools (architect.ts)
+5. Single-agent tools (single-agent.ts)
+
+This catches any tool that might grow large in the future without needing individual caps. The 10K default is deliberately larger than the tool-level caps so tool-level truncation fires first (with a specific label), and the universal cap only fires for tools that don't have their own cap.
+
+### Design decisions
+
+**Why mutate in place instead of returning a new tool?** Same pattern as `wrapWithCircuitBreaker` and `wrapWithLogging`. Mutating `invoke()` preserves the original tool reference — important because LangGraph uses object identity for tool resolution. A new object would break tool binding.
+
+**Why not cap `read_file` or `read_repo_file`?** They already have line-based truncation (200 and 500 lines respectively). Their worst case is bounded. The universal 10K wrapper is the safety net for them.
+
+**Why not reduce `maxOutputTokens` on the model?** This was considered and rejected. A low `maxOutputTokens` could cut off the LLM's response mid-tool-call JSON, producing malformed output that crashes the agent. Tool output capping is safer because it only affects inputs to the LLM, not its output generation.
+
+**Why are the caps hardcoded constants, not configurable?** These are implementation details, not user-facing settings. If an issue body is 3K chars, the first 2K is almost always enough context for the LLM to understand it. Making these configurable would add complexity with no practical benefit — if a specific tool needs a different cap, we'd adjust the constant.
+
+### Connections to previous entries
+
+- **Entry 55** (Conversation Pruning): Pruning compresses old messages after they've accumulated. Output capping prevents individual messages from being too large in the first place. They're complementary — capping reduces the input that pruning later needs to handle.
+- **Entry 59** (Single-Agent Mode & Context Compaction): The single-agent is the most vulnerable to output blowup since everything shares one context. The universal wrapper protects all 15 tools in its toolkit.
+- **Entry 29** (Composable Middleware via Tool Wrapping): `wrapWithOutputCap` follows the same compose-by-wrapping pattern established by `wrapWithLogging` and `wrapWithCircuitBreaker`. The outermost wrapper fires last (output cap truncates the already-logged result).

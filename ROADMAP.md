@@ -181,6 +181,7 @@ Incremental improvements after the v1.0.0 milestone. These are not new phases �
 | v2.1.0 | Targeted file reading (`startLine`/`endLine`) & diff context reduction (delta diffs for reviewer) | ✓ v2.1.0 |
 | v2.2.0 | Single-agent mode (`AGENT_MODE=single`) with context compaction — one agent, all tools, full lifecycle in one context window | ✓ v2.2.0 |
 | v2.3.0 | Token-efficient agent prompts — context reuse, targeted partial reads, reduced default read limit (500→200 lines) | ✓ v2.3.0 |
+| v2.4.0 | Tool output context management — two-layer defense (tool-level caps + universal `wrapWithOutputCap`) against oversized outputs | ✓ v2.4.0 |
 
 ---
 

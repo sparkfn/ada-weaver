@@ -5,6 +5,23 @@ import { tool } from 'langchain';
 import { z } from 'zod';
 import { withRetry } from './utils.js';
 
+// ── Output caps ──────────────────────────────────────────────────────────────
+
+const MAX_ISSUE_BODY_CHARS = 2_000;
+const MAX_CI_SUMMARY_CHARS = 1_000;
+
+function truncateBody(body: string | null, maxChars: number): string {
+  if (!body) return '(no description)';
+  if (body.length <= maxChars) return body;
+  return body.slice(0, maxChars) + `\n[... body truncated at ${maxChars} chars (original: ${body.length} chars)]`;
+}
+
+function truncateSummary(summary: string | undefined | null, maxChars: number): string | null {
+  if (!summary) return null;
+  if (summary.length <= maxChars) return summary;
+  return summary.slice(0, maxChars) + `\n[... summary truncated at ${maxChars} chars (original: ${summary.length} chars)]`;
+}
+
 // ── Circuit breaker ─────────────────────────────────────────────────────────
 
 /**
@@ -122,7 +139,7 @@ export function createGitHubIssuesTool(owner: string, repo: string, octokit: Oct
         if (since) { params.since = since; }
         const { data: issues } = await withRetry(() => octokit.rest.issues.listForRepo(params));
         const formattedIssues = issues.map((issue) => ({
-          number: issue.number, title: issue.title, body: issue.body || '(no description)',
+          number: issue.number, title: issue.title, body: truncateBody(issue.body, MAX_ISSUE_BODY_CHARS),
           state: issue.state, created_at: issue.created_at, updated_at: issue.updated_at,
           url: issue.html_url, labels: issue.labels.map((l) => l.name),
         }));
@@ -445,7 +462,7 @@ export function createFetchSubIssuesTool(owner: string, repo: string, octokit: O
           id: si.id,
           number: si.number,
           title: si.title,
-          body: si.body || '(no description)',
+          body: truncateBody(si.body, MAX_ISSUE_BODY_CHARS),
           state: si.state,
           labels: (si.labels || []).map((l: any) => typeof l === 'string' ? l : l.name ?? ''),
         }));
@@ -483,7 +500,7 @@ export function createGetParentIssueTool(owner: string, repo: string, octokit: O
             id: p.id,
             number: p.number,
             title: p.title,
-            body: p.body || '(no description)',
+            body: truncateBody(p.body, MAX_ISSUE_BODY_CHARS),
             state: p.state,
             labels: (p.labels || []).map((l: any) => typeof l === 'string' ? l : l.name ?? ''),
           },
@@ -588,7 +605,7 @@ export function createCheckCiStatusTool(owner: string, repo: string, octokit: Oc
           name: cr.name,
           status: cr.status,
           conclusion: cr.conclusion,
-          output_summary: cr.output?.summary || null,
+          output_summary: truncateSummary(cr.output?.summary, MAX_CI_SUMMARY_CHARS),
         }));
 
         const total = checkRuns.length;

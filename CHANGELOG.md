@@ -9,6 +9,22 @@
 
 ---
 
+## v2.4.0 — 2026-02-16
+
+**Tool Output Context Management.** Two-layer defense against oversized tool outputs blowing the LLM context window. Tool-level caps truncate the 4 worst offenders (bash, grep, issue bodies, CI summaries) before output leaves the handler. A universal safety-net wrapper (`wrapWithOutputCap`) is applied at all tool assembly points as the outermost layer.
+
+### Added
+- **`src/tool-output-cap.ts`** — universal output cap wrapper (`wrapWithOutputCap`). Wraps any LangChain tool's `invoke()` to truncate string results exceeding a configurable char limit (default 10K). Non-string results pass through unchanged. Same mutate-in-place pattern as `wrapWithCircuitBreaker` and `wrapWithLogging`.
+- 16 new tests — **9** in `tests/tool-output-cap.test.ts` (cap behavior, composition, non-string passthrough), **3** in `tests/local-tools.test.ts` (bash/grep truncation), **4** in `tests/github-tools.test.ts` (body/summary truncation) — **689 tests total**
+
+### Changed
+- **`src/local-tools.ts`** — bash output capped at 8K chars (both success and error paths); grep output capped at 8K chars
+- **`src/github-tools.ts`** — issue bodies capped at 2K chars (`fetch_github_issues`, `fetch_sub_issues`, `get_parent_issue`); CI output summaries capped at 1K chars (`check_ci_status`)
+- **`src/architect.ts`** — `wrapWithOutputCap()` applied at all 4 tool assembly points (issuer, coder, reviewer, architect)
+- **`src/single-agent.ts`** — `wrapWithOutputCap()` applied in `buildSingleAgentTools()`
+
+---
+
 ## v2.3.0 — 2026-02-16
 
 **Token-Efficient Agent Prompts & Reduced Read Default.** Five changes to reduce file-reading token waste by ~40% across multi-iteration runs. Agents now reuse prior context instead of re-exploring, use targeted partial reads instead of full files, and skip re-exploration on fix iterations.

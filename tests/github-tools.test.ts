@@ -1271,6 +1271,97 @@ describe('createCheckCiStatusTool', () => {
   });
 });
 
+// ── Issue body truncation ─────────────────────────────────────────────────────
+
+describe('fetch_github_issues (body truncation)', () => {
+  let octokit: ReturnType<typeof createMockOctokit>;
+
+  beforeEach(() => {
+    octokit = createMockOctokit();
+  });
+
+  it('truncates issue body exceeding 2K chars', async () => {
+    const longBody = 'x'.repeat(3000);
+    octokit.rest.issues.listForRepo.mockResolvedValue({
+      data: [{
+        number: 1, title: 'Big issue', body: longBody, state: 'open',
+        created_at: '2026-01-01', updated_at: '2026-02-01',
+        html_url: 'https://github.com/owner/repo/issues/1', labels: [],
+      }],
+    });
+
+    const toolFn = createGitHubIssuesTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ state: 'open', limit: 5 }));
+
+    expect(result[0].body).toContain('body truncated at 2000 chars');
+    expect(result[0].body).toContain('original: 3000 chars');
+    expect(result[0].body.length).toBeLessThan(3000);
+  });
+
+  it('leaves short body untouched', async () => {
+    octokit.rest.issues.listForRepo.mockResolvedValue({
+      data: [{
+        number: 1, title: 'Small issue', body: 'Short description', state: 'open',
+        created_at: '2026-01-01', updated_at: '2026-02-01',
+        html_url: 'https://github.com/owner/repo/issues/1', labels: [],
+      }],
+    });
+
+    const toolFn = createGitHubIssuesTool('owner', 'repo', octokit);
+    const result = JSON.parse(await toolFn.invoke({ state: 'open', limit: 5 }));
+
+    expect(result[0].body).toBe('Short description');
+  });
+});
+
+// ── CI summary truncation ────────────────────────────────────────────────────
+
+describe('check_ci_status (summary truncation)', () => {
+  let octokit: ReturnType<typeof createMockOctokit>;
+
+  beforeEach(() => {
+    octokit = createMockOctokit();
+  });
+
+  it('truncates output_summary exceeding 1K chars', async () => {
+    const longSummary = 'y'.repeat(2000);
+    octokit.rest.pulls.get.mockResolvedValue({
+      data: { head: { sha: 'abc123' } },
+    });
+    octokit.rest.checks.listForRef.mockResolvedValue({
+      data: {
+        check_runs: [
+          { name: 'test', status: 'completed', conclusion: 'failure', output: { summary: longSummary } },
+        ],
+      },
+    });
+
+    const tool = createCheckCiStatusTool('owner', 'repo', octokit);
+    const result = JSON.parse(await tool.invoke({ pull_number: 10 }));
+
+    expect(result.checks[0].output_summary).toContain('summary truncated at 1000 chars');
+    expect(result.checks[0].output_summary).toContain('original: 2000 chars');
+  });
+
+  it('leaves short summary untouched', async () => {
+    octokit.rest.pulls.get.mockResolvedValue({
+      data: { head: { sha: 'abc123' } },
+    });
+    octokit.rest.checks.listForRef.mockResolvedValue({
+      data: {
+        check_runs: [
+          { name: 'test', status: 'completed', conclusion: 'success', output: { summary: 'All passed' } },
+        ],
+      },
+    });
+
+    const tool = createCheckCiStatusTool('owner', 'repo', octokit);
+    const result = JSON.parse(await tool.invoke({ pull_number: 10 }));
+
+    expect(result.checks[0].output_summary).toBe('All passed');
+  });
+});
+
 // ── Dry-run check CI status tool ────────────────────────────────────────────
 
 describe('createDryRunCheckCiStatusTool', () => {

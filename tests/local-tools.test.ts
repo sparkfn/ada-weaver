@@ -277,4 +277,38 @@ describe('bash', () => {
     const result = await tool.invoke({ command: 'true' });
     expect(result).toBe('(no output)');
   });
+
+  it('truncates output exceeding 8K chars', async () => {
+    // Generate a file with enough content to exceed 8000 chars when cat'd
+    const bigContent = 'x'.repeat(10_000);
+    fs.writeFileSync(path.join(tmpDir, 'big.txt'), bigContent);
+    const tool = createLocalBashTool(ws);
+    const result = await tool.invoke({ command: 'cat big.txt' });
+    expect(result).toContain('bash output truncated at 8000 chars');
+    expect(result).toContain('original: 10000 chars');
+  });
+
+  it('does not truncate small output', async () => {
+    const tool = createLocalBashTool(ws);
+    const result = await tool.invoke({ command: 'echo hello' });
+    expect(result.trim()).toBe('hello');
+    expect(result).not.toContain('truncated');
+  });
+});
+
+// ── grep truncation ─────────────────────────────────────────────────────────
+
+describe('grep truncation', () => {
+  it('truncates output exceeding 8K chars', async () => {
+    // Create many files so grep output exceeds 8000 chars
+    for (let i = 0; i < 200; i++) {
+      fs.writeFileSync(
+        path.join(tmpDir, 'src', `file${i}.ts`),
+        `export const value${i} = "match_target_${i}_${'x'.repeat(50)}";\n`,
+      );
+    }
+    const tool = createLocalGrepTool(ws);
+    const result = await tool.invoke({ pattern: 'match_target' });
+    expect(result).toContain('grep output truncated at 8000 chars');
+  });
 });

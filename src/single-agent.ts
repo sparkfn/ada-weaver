@@ -48,6 +48,7 @@ import {
   formatUsageSummaryComment,
   getMaxIterations,
 } from './architect.js';
+import { wrapWithOutputCap } from './tool-output-cap.js';
 import type { ArchitectResult, ContinueContext } from './architect.js';
 
 // ── Tool assembly ────────────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ export function buildSingleAgentTools(
     dryRun ? createDryRunCheckCiStatusTool() : createCheckCiStatusTool(owner, repo, octokit),
     // Context tools
     ...(opts.contextTools ?? []),
-  ];
+  ].map(t => wrapWithOutputCap(t));
 }
 
 // ── System prompt ────────────────────────────────────────────────────────────

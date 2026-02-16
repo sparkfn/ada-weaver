@@ -43,6 +43,7 @@ import type { UsageService } from './usage-service.js';
 import type { AgentRole, LLMProvider } from './usage-types.js';
 import type { IssueContextRepository } from './issue-context-repository.js';
 import { createSaveContextTool, createGetContextTool, createSearchPastIssuesTool } from './context-tools.js';
+import { wrapWithOutputCap } from './tool-output-cap.js';
 
 // ── Result interface ────────────────────────────────────────────────────────
 
@@ -257,7 +258,7 @@ export function createIssuerSubagent(
     createGetParentIssueTool(owner, repo, octokit),
     dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
     ...(opts.contextTools ?? []),
-  ];
+  ].map(t => wrapWithOutputCap(t));
 
   const systemPrompt = `You are the Issuer agent for the GitHub repository ${owner}/${repo}.
 
@@ -356,7 +357,7 @@ export function createCoderSubagent(
     dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit),
     dryRun ? createDryRunCreateSubIssueTool() : createCreateSubIssueTool(owner, repo, octokit),
     ...(opts.contextTools ?? []),
-  ];
+  ].map(t => wrapWithOutputCap(t));
 
   const systemPrompt = `You are the Coder agent for the GitHub repository ${owner}/${repo}.
 
@@ -488,7 +489,7 @@ export function createReviewerSubagent(
     createLocalGrepTool(ws),
     createSubmitPrReviewTool(octokit, owner, repo),
     ...(opts?.contextTools ?? []),
-  ];
+  ].map(t => wrapWithOutputCap(t));
 
   let systemPrompt = buildReviewerSystemPrompt(owner, repo);
 
@@ -678,7 +679,7 @@ export async function createArchitect(
     createLocalGrepTool(architectWs),
     options.dryRun ? createDryRunCheckCiStatusTool() : createCheckCiStatusTool(owner, repo, octokit),
     ...architectContextTools,
-  ];
+  ].map(t => wrapWithOutputCap(t));
 
   const systemPrompt = buildArchitectSystemPrompt(owner, repo, maxIterations);
   const model = createModel(config);

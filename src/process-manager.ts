@@ -6,6 +6,7 @@ import { runReviewSingle } from './reviewer-agent.js';
 import { loadPollState } from './core.js';
 import type { UsageService } from './usage-service.js';
 import type { ProcessRepository } from './process-repository.js';
+import type { IssueContextRepository } from './issue-context-repository.js';
 
 // ── Interfaces ───────────────────────────────────────────────────────────────
 
@@ -54,12 +55,16 @@ export class ProcessManager extends EventEmitter {
   private config: Config;
   private usageService?: UsageService;
   private processRepo?: ProcessRepository;
+  private issueContextRepo?: IssueContextRepository;
+  private repoId: number;
 
-  constructor(config: Config, usageService?: UsageService, processRepo?: ProcessRepository) {
+  constructor(config: Config, usageService?: UsageService, processRepo?: ProcessRepository, issueContextRepo?: IssueContextRepository, repoId?: number) {
     super();
     this.config = config;
     this.usageService = usageService;
     this.processRepo = processRepo;
+    this.issueContextRepo = issueContextRepo;
+    this.repoId = repoId ?? 0;
   }
 
   private persistSave(proc: AgentProcess): void {
@@ -265,6 +270,8 @@ export class ProcessManager extends EventEmitter {
         continueContext: options.continueContext,
         usageService: this.usageService,
         processId: proc.id,
+        contextRepo: this.issueContextRepo,
+        repoId: this.repoId,
       });
 
       if (signal.aborted) return; // already marked cancelled

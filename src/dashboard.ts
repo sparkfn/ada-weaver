@@ -8,6 +8,7 @@ import { UsageService } from './usage-service.js';
 import type { UsageQuery, UsageGroupBy } from './usage-types.js';
 import type { UsageRepository } from './usage-repository.js';
 import type { ProcessRepository } from './process-repository.js';
+import type { IssueContextRepository } from './issue-context-repository.js';
 import { verifySignature, handleWebhookEvent } from './listener.js';
 import { chatStream } from './chat-agent.js';
 
@@ -50,12 +51,14 @@ function parseUsageQuery(query: Record<string, any>): UsageQuery {
 export interface DashboardOptions {
   usageRepository?: UsageRepository;
   processRepository?: ProcessRepository;
+  issueContextRepository?: IssueContextRepository;
+  repoId?: number;
 }
 
 export function createDashboardApp(config: Config, options?: DashboardOptions): { app: express.Express; processManager: ProcessManager; usageService: UsageService } {
   const app = express();
   const usageService = new UsageService(options?.usageRepository);
-  const processManager = new ProcessManager(config, usageService, options?.processRepository);
+  const processManager = new ProcessManager(config, usageService, options?.processRepository, options?.issueContextRepository, options?.repoId);
 
   // Parse JSON for all routes except /webhook (which needs the raw body for HMAC)
   app.use((req, res, next) => {

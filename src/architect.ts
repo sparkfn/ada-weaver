@@ -34,6 +34,8 @@ import type { Octokit } from 'octokit';
 import type { ProgressUpdate } from './process-manager.js';
 import type { UsageService } from './usage-service.js';
 import type { AgentRole, LLMProvider } from './usage-types.js';
+import type { IssueContextRepository } from './issue-context-repository.js';
+import { createSaveContextTool, createGetContextTool, createSearchPastIssuesTool } from './context-tools.js';
 
 // ── Result interface ────────────────────────────────────────────────────────
 
@@ -234,7 +236,7 @@ export function createIssuerSubagent(
   owner: string,
   repo: string,
   octokit: Octokit,
-  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; cache?: ToolCache } = {},
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; cache?: ToolCache; contextTools?: ReturnType<typeof tool>[] } = {},
 ): SubAgent {
   const dryRun = opts.dryRun ?? false;
 
@@ -253,6 +255,7 @@ export function createIssuerSubagent(
     createFetchSubIssuesTool(owner, repo, octokit),
     createGetParentIssueTool(owner, repo, octokit),
     dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
+    ...(opts.contextTools ?? []),
   ];
 
   const systemPrompt = `You are the Issuer agent for the GitHub repository ${owner}/${repo}.
@@ -311,7 +314,11 @@ CONSTRAINTS:
 
 IMPORTANT — TOOL USAGE:
 - ONLY use the GitHub API tools: fetch_github_issues, list_repo_files, read_repo_file, fetch_sub_issues, get_parent_issue, comment_on_issue.
-- You may see other tools (ls, write, edit, grep, glob, etc.) — these are sandbox filesystem tools. Do NOT use them. They have no access to the repository. All repo operations go through the GitHub API tools listed above.`;
+- You may see other tools (ls, write, edit, grep, glob, etc.) — these are sandbox filesystem tools. Do NOT use them. They have no access to the repository. All repo operations go through the GitHub API tools listed above.
+
+SHARED CONTEXT:
+- After your analysis, save your brief with \`save_issue_context\` (entry_type: "issuer_brief"). Include the files you identified in files_touched.
+- Use \`search_past_issues\` to check if similar issues have been resolved before — pass the relevant file paths to find overlap.`;
 
   return {
     name: 'issuer',
@@ -330,7 +337,7 @@ export function createCoderSubagent(
   owner: string,
   repo: string,
   octokit: Octokit,
-  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; cache?: ToolCache },
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; cache?: ToolCache; contextTools?: ReturnType<typeof tool>[] },
 ): SubAgent {
   const dryRun = opts.dryRun ?? false;
 
@@ -352,6 +359,7 @@ export function createCoderSubagent(
     writeTool,
     dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit),
     dryRun ? createDryRunCreateSubIssueTool() : createCreateSubIssueTool(owner, repo, octokit),
+    ...(opts.contextTools ?? []),
   ];
 
   const systemPrompt = `You are the Coder agent for the GitHub repository ${owner}/${repo}.
@@ -441,7 +449,11 @@ TESTING GUIDELINES (only when instructed by the Architect):
 - Use the same test framework and patterns already in the repo
 - At minimum cover: happy path + one error/edge case
 - If the repo has no existing tests, skip — do not introduce a test framework from scratch
-- If the Architect does not mention tests, skip this section entirely`;
+- If the Architect does not mention tests, skip this section entirely
+
+SHARED CONTEXT:
+- Before planning, read shared context with \`get_issue_context\` to see the issuer's brief and architect's plan directly.
+- Save your execution plan with \`save_issue_context\` (entry_type: "coder_plan"). Include the files you plan to modify in files_touched.`;
 
   return {
     name: 'coder',
@@ -462,6 +474,7 @@ export function createReviewerSubagent(
   octokit: Octokit,
   model?: ReturnType<typeof createModel>,
   cache?: ToolCache,
+  contextTools?: ReturnType<typeof tool>[],
 ): SubAgent {
   let diffTool = createGetPrDiffTool(octokit, owner, repo);
   let listTool = createListRepoFilesTool(owner, repo, octokit);
@@ -478,9 +491,14 @@ export function createReviewerSubagent(
     listTool,
     readTool,
     createSubmitPrReviewTool(octokit, owner, repo),
+    ...(contextTools ?? []),
   ];
 
-  const systemPrompt = buildReviewerSystemPrompt(owner, repo);
+  let systemPrompt = buildReviewerSystemPrompt(owner, repo);
+
+  systemPrompt += `\n\nSHARED CONTEXT:
+- Read the coder's plan with \`get_issue_context\` before reviewing — understand what was intended before judging the diff.
+- Save your feedback with \`save_issue_context\` (entry_type: "review_feedback"). Include the files you reviewed in files_touched.`;
 
   return {
     name: 'reviewer',
@@ -533,19 +551,11 @@ STANDARD WORKFLOW:
    - Then delegate to reviewer again (and recheck CI if applicable)
 8. Report the final outcome
 
-PARALLEL EXECUTION (advanced):
-When multiple independent tasks can run simultaneously, you may call the task tool
-multiple times in a single response. For example:
-- After the issuer's brief reveals multiple independent sub-tasks, you can delegate
-  to multiple coders in parallel (each working on a separate branch/PR).
-- You can review multiple PRs in parallel by delegating to reviewer multiple times.
-
-RULES FOR PARALLEL DELEGATION:
-- Each parallel coder MUST work on a different branch (e.g., issue-N-part-a, issue-N-part-b).
-- Never send the same task to two subagents simultaneously.
-- The issuer step should remain sequential (only one issue to analyze).
-- If unsure whether tasks are independent, run them sequentially.
-- The standard sequential workflow is always valid — parallelism is optional.
+PARALLEL EXECUTION — RESTRICTED:
+Do NOT use parallel delegation unless the issue has explicit sub-issues returned by fetch_sub_issues.
+For a single issue (no sub-issues), ALWAYS use the standard sequential workflow: one issuer → one coder → one reviewer.
+Parallel delegation wastes tokens and risks creating duplicate PRs with wrong issue references.
+Only when fetch_sub_issues returns multiple truly independent sub-tasks may you delegate to multiple coders, each on a different branch.
 
 ITERATION LIMIT: ${maxIterations} review→fix cycles maximum. After that, report the current state.
 
@@ -553,7 +563,9 @@ CRITICAL RULES:
 - You DECIDE the workflow. You can skip steps, reorder, or stop based on judgment.
 - You have read-only tools for verification: use them to check issue status or repo state.
 - ALWAYS use the task tool to delegate. Never try to write code or post comments yourself.
+- When delegating to coder, ALWAYS include the exact issue number: "Fix issue #N". The coder must use this number in the branch name (issue-N-...) and PR title (Fix #N: ...). Never let the coder guess or infer the issue number.
 - When delegating to coder for fixes, always specify the existing branch name and PR number.
+- Only ONE coder delegation per issue unless there are explicit sub-issues. Never split a single issue into multiple PRs.
 - Your final message should be a clear summary of what was done and the outcome.
 - NEVER tell subagents they have "filesystem access" or "local file access". All subagents operate through GitHub API tools only. Do not mention filesystem, sandbox, ls, write, edit, grep, or glob tools in your instructions.
 
@@ -561,14 +573,26 @@ AVAILABLE TOOLS FOR VERIFICATION (read-only):
 - fetch_github_issues: Check issue details
 - list_repo_files: Browse repo structure
 - read_repo_file: Read file contents
-- check_ci_status: Check CI/check-run results for a PR (returns success, failure, in_progress, or no_checks)`;
+- check_ci_status: Check CI/check-run results for a PR (returns success, failure, in_progress, or no_checks)
+
+SHARED CONTEXT:
+- Use \`save_issue_context\` to record your plan (entry_type: "architect_plan") before delegating to subagents.
+- Use \`search_past_issues\` before planning to check if similar issues have been resolved before — pass relevant file paths for overlap search.
+- All subagents can read shared context with \`get_issue_context\`. Their outputs are also auto-captured.`;
 }
 
 // ── Architect factory ────────────────────────────────────────────────────────
 
 export function createArchitect(
   config: Config,
-  options: { dryRun?: boolean; maxIterations?: number } = {},
+  options: {
+    dryRun?: boolean;
+    maxIterations?: number;
+    issueNumber?: number;
+    processId?: string | null;
+    contextRepo?: IssueContextRepository;
+    repoId?: number;
+  } = {},
 ) {
   const { owner, repo } = config.github;
   const octokit = createGitHubClient(getAuthFromConfig(config.github));
@@ -591,11 +615,43 @@ export function createArchitect(
   // Shared file cache across all subagents
   const cache = new ToolCache();
 
+  // Build per-agent context tools (if contextRepo is provided)
+  const ctxRepo = options.contextRepo;
+  const ctxRepoId = options.repoId ?? 0;
+  const ctxIssue = options.issueNumber ?? 0;
+  const ctxProcess = options.processId ?? null;
+
+  let issuerContextTools: ReturnType<typeof tool>[] | undefined;
+  let coderContextTools: ReturnType<typeof tool>[] | undefined;
+  let reviewerContextTools: ReturnType<typeof tool>[] | undefined;
+  let architectContextTools: ReturnType<typeof tool>[] = [];
+
+  if (ctxRepo && ctxIssue > 0) {
+    issuerContextTools = [
+      createSaveContextTool(ctxRepo, ctxRepoId, ctxIssue, ctxProcess, 'issuer'),
+      ...(ctxProcess ? [createGetContextTool(ctxRepo, ctxProcess)] : []),
+      createSearchPastIssuesTool(ctxRepo, ctxRepoId, ctxIssue),
+    ];
+    coderContextTools = [
+      createSaveContextTool(ctxRepo, ctxRepoId, ctxIssue, ctxProcess, 'coder'),
+      ...(ctxProcess ? [createGetContextTool(ctxRepo, ctxProcess)] : []),
+    ];
+    reviewerContextTools = [
+      createSaveContextTool(ctxRepo, ctxRepoId, ctxIssue, ctxProcess, 'reviewer'),
+      ...(ctxProcess ? [createGetContextTool(ctxRepo, ctxProcess)] : []),
+    ];
+    architectContextTools = [
+      createSaveContextTool(ctxRepo, ctxRepoId, ctxIssue, ctxProcess, 'architect'),
+      ...(ctxProcess ? [createGetContextTool(ctxRepo, ctxProcess)] : []),
+      createSearchPastIssuesTool(ctxRepo, ctxRepoId, ctxIssue),
+    ];
+  }
+
   // Build subagents
   const subagents = [
-    createIssuerSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: issuerModel, cache }),
-    createCoderSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: coderModel, cache }),
-    createReviewerSubagent(owner, repo, octokit, reviewerModel, cache),
+    createIssuerSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: issuerModel, cache, contextTools: issuerContextTools }),
+    createCoderSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: coderModel, cache, contextTools: coderContextTools }),
+    createReviewerSubagent(owner, repo, octokit, reviewerModel, cache, reviewerContextTools),
   ];
 
   // Architect's own read-only tools for verification (also cached)
@@ -609,6 +665,7 @@ export function createArchitect(
     architectListTool,
     architectReadTool,
     options.dryRun ? createDryRunCheckCiStatusTool() : createCheckCiStatusTool(owner, repo, octokit),
+    ...architectContextTools,
   ];
 
   const systemPrompt = buildArchitectSystemPrompt(owner, repo, maxIterations);
@@ -738,7 +795,7 @@ export interface ContinueContext {
 export async function runArchitect(
   config: Config,
   issueNumber: number,
-  options: { dryRun?: boolean; onProgress?: (update: ProgressUpdate) => void; signal?: AbortSignal; continueContext?: ContinueContext; usageService?: UsageService; processId?: string } = {},
+  options: { dryRun?: boolean; onProgress?: (update: ProgressUpdate) => void; signal?: AbortSignal; continueContext?: ContinueContext; usageService?: UsageService; processId?: string; contextRepo?: IssueContextRepository; repoId?: number } = {},
 ): Promise<ArchitectResult> {
   const maxIterations = getMaxIterations(config);
 
@@ -753,7 +810,14 @@ export async function runArchitect(
   }
   console.log('');
 
-  const { agent: architect, cache } = createArchitect(config, { dryRun: options.dryRun, maxIterations });
+  const { agent: architect, cache } = createArchitect(config, {
+    dryRun: options.dryRun,
+    maxIterations,
+    issueNumber,
+    processId: options.processId,
+    contextRepo: options.contextRepo,
+    repoId: options.repoId,
+  });
 
   // Octokit client for diff fetching after coder completes
   const { owner, repo } = config.github;
@@ -841,6 +905,28 @@ Skip the issuer step — go directly to the reviewer:
         const agentResponse = extractSubagentResponse(ev.data?.output);
         if (agentResponse) {
           logAgentDetail(`${run.subagentType} output`, agentResponse);
+        }
+
+        // Auto-capture subagent output as context entry (reliability backstop)
+        if (options.contextRepo && agentResponse && issueNumber > 0) {
+          const entryTypeMap: Record<string, string> = {
+            issuer: 'issuer_brief',
+            coder: 'coder_plan',
+            reviewer: 'review_feedback',
+          };
+          const autoEntryType = entryTypeMap[run.subagentType];
+          if (autoEntryType) {
+            options.contextRepo.addEntry({
+              repoId: options.repoId ?? 0,
+              issueNumber,
+              processId: options.processId ?? null,
+              entryType: autoEntryType as any,
+              agent: `${run.subagentType}:auto`,
+              content: agentResponse.slice(0, 10000),
+              filesTouched: [],
+              iteration: reviewerCount,
+            }).catch(() => { /* best-effort auto-capture */ });
+          }
         }
 
         options.onProgress?.({
@@ -950,6 +1036,22 @@ Skip the issuer step — go directly to the reviewer:
 
   console.log('='.repeat(60));
   console.log('\n\u{2705} Architect completed!\n');
+
+  // Auto-save outcome entry
+  if (options.contextRepo && lastResponse && issueNumber > 0) {
+    try {
+      await options.contextRepo.addEntry({
+        repoId: options.repoId ?? 0,
+        issueNumber,
+        processId: options.processId ?? null,
+        entryType: 'outcome',
+        agent: 'architect:auto',
+        content: lastResponse.slice(0, 10000),
+        filesTouched: [],
+        iteration: reviewerCount,
+      });
+    } catch { /* best-effort */ }
+  }
 
   // Log cache stats
   const stats = cache.getStats();

@@ -8,6 +8,7 @@ import { runArchitect } from './architect.js';
 import type { PollRepository } from './poll-repository.js';
 import { FilePollRepository } from './poll-repository.js';
 import { UsageService } from './usage-service.js';
+import type { IssueContextRepository } from './issue-context-repository.js';
 
 // ── Issue data interface ─────────────────────────────────────────────────────
 
@@ -305,7 +306,7 @@ async function fetchIssuesForPoll(
  * The Architect supervisor handles everything: issue understanding (Issuer),
  * implementation (Coder), and review (Reviewer). No separate triage phase needed.
  */
-export async function runPollCycle(config: Config, options: { noSave?: boolean; dryRun?: boolean; maxIssues?: number; maxToolCalls?: number; pollRepository?: PollRepository; repoId?: number } = {}): Promise<void> {
+export async function runPollCycle(config: Config, options: { noSave?: boolean; dryRun?: boolean; maxIssues?: number; maxToolCalls?: number; pollRepository?: PollRepository; repoId?: number; issueContextRepository?: IssueContextRepository } = {}): Promise<void> {
   const maxIssues = options.maxIssues ?? getMaxIssues(config);
   // Dry run implies no-save (never persist state when skipping writes)
   const skipSave = options.noSave || options.dryRun;
@@ -377,7 +378,13 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
     try {
       const usageService = new UsageService();
       const processId = `poll-${issue.number}-${Date.now()}`;
-      const result = await runArchitect(config, issue.number, { dryRun: options.dryRun, usageService, processId });
+      const result = await runArchitect(config, issue.number, {
+        dryRun: options.dryRun,
+        usageService,
+        processId,
+        contextRepo: options.issueContextRepository,
+        repoId: options.repoId,
+      });
       processedNumbers.push(issue.number);
 
       // Record actions from the Architect result

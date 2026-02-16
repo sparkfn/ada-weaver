@@ -7,18 +7,22 @@ import type { RepoRepository } from '../repo-repository.js';
 import { StaticRepoRepository } from '../repo-repository.js';
 import type { UsageRepository } from '../usage-repository.js';
 import { InMemoryUsageRepository } from '../usage-repository.js';
+import type { IssueContextRepository } from '../issue-context-repository.js';
+import { InMemoryIssueContextRepository } from '../issue-context-repository.js';
 import { initPool } from './connection.js';
 import { runMigrations } from './migrate.js';
 import { PostgresRepoRepository } from './pg-repo-repository.js';
 import { PostgresPollRepository } from './pg-poll-repository.js';
 import { PostgresUsageRepository } from './pg-usage-repository.js';
 import { PostgresProcessRepository } from './pg-process-repository.js';
+import { PostgresIssueContextRepository } from './pg-issue-context-repository.js';
 
 export interface Repositories {
   repoRepository: RepoRepository;
   pollRepository: PollRepository;
   processRepository: ProcessRepository;
   usageRepository: UsageRepository;
+  issueContextRepository: IssueContextRepository;
   repoId: number;
 }
 
@@ -53,6 +57,7 @@ export async function createRepositories(config: Config): Promise<Repositories> 
       pollRepository: new PostgresPollRepository(pool),
       processRepository: new PostgresProcessRepository(pool, repoId),
       usageRepository: new PostgresUsageRepository(pool, repoId),
+      issueContextRepository: new PostgresIssueContextRepository(pool, repoId),
       repoId,
     };
   }
@@ -64,6 +69,7 @@ export async function createRepositories(config: Config): Promise<Repositories> 
     pollRepository: new FilePollRepository(),
     processRepository: new InMemoryProcessRepository(),
     usageRepository: new InMemoryUsageRepository(),
+    issueContextRepository: new InMemoryIssueContextRepository(),
     repoId: 0,
   };
 }

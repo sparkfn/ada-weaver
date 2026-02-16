@@ -408,6 +408,7 @@ async function main() {
         maxToolCalls,
         pollRepository: pollRepos.pollRepository,
         repoId: pollRepos.repoId,
+        issueContextRepository: pollRepos.issueContextRepository,
       });
       break;
     }
@@ -429,9 +430,17 @@ async function main() {
       const dryRun = flags['dry-run'] === true;
 
       console.log('\u{1F916} Deep Agents Architect\n');
-      const usageService = new UsageService();
+      const { createRepositories: createAnalyzeRepos } = await import('./db/repositories.js');
+      const analyzeRepos = await createAnalyzeRepos(config);
+      const usageService = new UsageService(analyzeRepos.usageRepository);
       const processId = `analyze-${issueNumber}-${Date.now()}`;
-      const result = await runArchitect(config, issueNumber, { dryRun, usageService, processId });
+      const result = await runArchitect(config, issueNumber, {
+        dryRun,
+        usageService,
+        processId,
+        contextRepo: analyzeRepos.issueContextRepository,
+        repoId: analyzeRepos.repoId,
+      });
 
       console.log('\n' + '\u{2500}'.repeat(60));
       console.log('\u{1F4CB} Architect summary:');
@@ -564,6 +573,8 @@ async function main() {
       activeServer = startUnifiedServer(config, {
         usageRepository: repos.usageRepository,
         processRepository: repos.processRepository,
+        issueContextRepository: repos.issueContextRepository,
+        repoId: repos.repoId,
       });
       // Server runs until process is killed (SIGTERM/SIGINT)
       break;
@@ -610,6 +621,8 @@ async function main() {
       activeServer = startDashboardServer(config, dashPort, {
         usageRepository: dashRepos.usageRepository,
         processRepository: dashRepos.processRepository,
+        issueContextRepository: dashRepos.issueContextRepository,
+        repoId: dashRepos.repoId,
       });
       // Server runs until process is killed (SIGTERM/SIGINT)
       break;

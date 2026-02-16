@@ -60,17 +60,16 @@ describe('buildArchitectSystemPrompt', () => {
     expect(prompt).toContain('failure');
   });
 
-  it('contains PARALLEL EXECUTION section', () => {
+  it('contains PARALLEL EXECUTION restrictions', () => {
     const prompt = buildArchitectSystemPrompt('o', 'r', 3);
     expect(prompt).toContain('PARALLEL EXECUTION');
-    expect(prompt).toContain('multiple independent tasks');
+    expect(prompt).toContain('Do NOT use parallel delegation unless');
   });
 
-  it('contains RULES FOR PARALLEL DELEGATION', () => {
+  it('contains single-issue guardrails', () => {
     const prompt = buildArchitectSystemPrompt('o', 'r', 3);
-    expect(prompt).toContain('RULES FOR PARALLEL DELEGATION');
-    expect(prompt).toContain('different branch');
-    expect(prompt).toContain('issuer step should remain sequential');
+    expect(prompt).toContain('Only ONE coder delegation per issue');
+    expect(prompt).toContain('ALWAYS include the exact issue number');
   });
 });
 

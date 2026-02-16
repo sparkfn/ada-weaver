@@ -9,6 +9,7 @@ import type { UsageQuery, UsageGroupBy } from './usage-types.js';
 import type { UsageRepository } from './usage-repository.js';
 import type { ProcessRepository } from './process-repository.js';
 import type { IssueContextRepository } from './issue-context-repository.js';
+import type { RepoRepository } from './repo-repository.js';
 import { verifySignature, handleWebhookEvent } from './listener.js';
 import { chatStream } from './chat-agent.js';
 
@@ -52,13 +53,14 @@ export interface DashboardOptions {
   usageRepository?: UsageRepository;
   processRepository?: ProcessRepository;
   issueContextRepository?: IssueContextRepository;
+  repoRepository?: RepoRepository;
   repoId?: number;
 }
 
 export function createDashboardApp(config: Config, options?: DashboardOptions): { app: express.Express; processManager: ProcessManager; usageService: UsageService } {
   const app = express();
   const usageService = new UsageService(options?.usageRepository);
-  const processManager = new ProcessManager(config, usageService, options?.processRepository, options?.issueContextRepository, options?.repoId);
+  const processManager = new ProcessManager(config, usageService, options?.processRepository, options?.issueContextRepository, options?.repoId, options?.repoRepository);
 
   // Parse JSON for all routes except /webhook (which needs the raw body for HMAC)
   app.use((req, res, next) => {
@@ -107,21 +109,22 @@ export function createDashboardApp(config: Config, options?: DashboardOptions): 
 
   // Start analysis
   app.post('/api/processes/analyze', (req: Request, res: Response) => {
-    const { issueNumber, dryRun } = req.body as { issueNumber?: number; dryRun?: boolean };
+    const { issueNumber, dryRun, repoId } = req.body as { issueNumber?: number; dryRun?: boolean; repoId?: number };
     if (!issueNumber || typeof issueNumber !== 'number' || issueNumber < 1) {
       res.status(400).json({ error: 'issueNumber must be a positive integer' });
       return;
     }
-    const proc = processManager.startAnalysis(issueNumber, { dryRun });
+    const proc = processManager.startAnalysis(issueNumber, { dryRun, repoId });
     res.status(201).json(proc);
   });
 
   // Continue analysis (review→fix loop on existing PR)
   app.post('/api/processes/continue', (req: Request, res: Response) => {
-    const { issueNumber, prNumber, branchName } = req.body as {
+    const { issueNumber, prNumber, branchName, repoId } = req.body as {
       issueNumber?: number;
       prNumber?: number;
       branchName?: string;
+      repoId?: number;
     };
     if (!issueNumber || typeof issueNumber !== 'number' || issueNumber < 1) {
       res.status(400).json({ error: 'issueNumber must be a positive integer' });
@@ -135,18 +138,18 @@ export function createDashboardApp(config: Config, options?: DashboardOptions): 
       res.status(400).json({ error: 'branchName is required' });
       return;
     }
-    const proc = processManager.continueAnalysis(issueNumber, prNumber, branchName);
+    const proc = processManager.continueAnalysis(issueNumber, prNumber, branchName, undefined, repoId);
     res.status(201).json(proc);
   });
 
   // Start review
   app.post('/api/processes/review', (req: Request, res: Response) => {
-    const { prNumber } = req.body as { prNumber?: number };
+    const { prNumber, repoId } = req.body as { prNumber?: number; repoId?: number };
     if (!prNumber || typeof prNumber !== 'number' || prNumber < 1) {
       res.status(400).json({ error: 'prNumber must be a positive integer' });
       return;
     }
-    const proc = processManager.startReview(prNumber);
+    const proc = processManager.startReview(prNumber, { repoId });
     res.status(201).json(proc);
   });
 
@@ -158,6 +161,77 @@ export function createDashboardApp(config: Config, options?: DashboardOptions): 
       return;
     }
     res.json({ cancelled: true });
+  });
+
+  // ── Repo CRUD endpoints ────────────────────────────────────────────────────
+
+  app.get('/api/repos', async (req: Request, res: Response) => {
+    if (!options?.repoRepository) {
+      res.status(501).json({ error: 'Repo management requires a database' });
+      return;
+    }
+    const activeOnly = req.query.activeOnly !== 'false';
+    const repos = await options.repoRepository.list(activeOnly);
+    res.json(repos);
+  });
+
+  app.post('/api/repos', async (req: Request, res: Response) => {
+    if (!options?.repoRepository) {
+      res.status(501).json({ error: 'Repo management requires a database' });
+      return;
+    }
+    const { owner, repo, configJson } = req.body as { owner?: string; repo?: string; configJson?: Record<string, unknown> };
+    if (!owner || typeof owner !== 'string' || !repo || typeof repo !== 'string') {
+      res.status(400).json({ error: 'owner and repo are required strings' });
+      return;
+    }
+    try {
+      const record = await options.repoRepository.create(owner.trim(), repo.trim(), configJson);
+      res.status(201).json(record);
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        res.status(409).json({ error: 'Repo already exists' });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  app.patch('/api/repos/:id', async (req: Request, res: Response) => {
+    if (!options?.repoRepository) {
+      res.status(501).json({ error: 'Repo management requires a database' });
+      return;
+    }
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ error: 'Invalid repo id' });
+      return;
+    }
+    const { configJson } = req.body as { configJson?: Record<string, unknown> };
+    const updated = await options.repoRepository.update(id, { configJson });
+    if (!updated) {
+      res.status(404).json({ error: 'Repo not found' });
+      return;
+    }
+    res.json(updated);
+  });
+
+  app.delete('/api/repos/:id', async (req: Request, res: Response) => {
+    if (!options?.repoRepository) {
+      res.status(501).json({ error: 'Repo management requires a database' });
+      return;
+    }
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ error: 'Invalid repo id' });
+      return;
+    }
+    const deactivated = await options.repoRepository.deactivate(id);
+    if (!deactivated) {
+      res.status(404).json({ error: 'Repo not found or already deactivated' });
+      return;
+    }
+    res.json({ deactivated: true });
   });
 
   // ── Usage API endpoints ─────────────────────────────────────────────────────

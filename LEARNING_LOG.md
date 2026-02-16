@@ -6458,3 +6458,63 @@ This catches any tool that might grow large in the future without needing indivi
 - **Entry 55** (Conversation Pruning): Pruning compresses old messages after they've accumulated. Output capping prevents individual messages from being too large in the first place. They're complementary — capping reduces the input that pruning later needs to handle.
 - **Entry 59** (Single-Agent Mode & Context Compaction): The single-agent is the most vulnerable to output blowup since everything shares one context. The universal wrapper protects all 15 tools in its toolkit.
 - **Entry 29** (Composable Middleware via Tool Wrapping): `wrapWithOutputCap` follows the same compose-by-wrapping pattern established by `wrapWithLogging` and `wrapWithCircuitBreaker`. The outermost wrapper fires last (output cap truncates the already-logged result).
+
+## Entry 61: Multi-Repo CRUD — Dashboard Repo Management (v2.5.0)
+
+**Date:** 2026-02-16
+**Author:** Architect Agent
+
+### The problem
+
+The database schema already supports multiple repositories — all tables FK to `repos.id` — but there was no way to add or manage repos. The only repo in the database was the one from `GITHUB_OWNER`/`GITHUB_REPO` env vars, auto-upserted on startup via `ensureRepo()`. To work with a different repo, you had to change env vars and restart the server.
+
+### Solution: CRUD interface + per-process repo override
+
+**Three layers of changes:**
+
+1. **Repository layer** — Added `create`, `update`, `deactivate` to the `RepoRepository` interface. The `StaticRepoRepository` (used when no database is configured) throws descriptive errors for write methods. The `PostgresRepoRepository` implements them with straightforward SQL: INSERT (no ON CONFLICT — let PG unique violation propagate as error code `23505`), UPDATE config_json, and soft-delete via `is_active = FALSE`.
+
+2. **API layer** — Four new routes in `dashboard.ts`: `GET /api/repos`, `POST /api/repos`, `PATCH /api/repos/:id`, `DELETE /api/repos/:id`. All guarded with `if (!options?.repoRepository)` returning 501, so the routes degrade gracefully when no database is configured. POST catches PG error `23505` and returns 409 "Repo already exists".
+
+3. **Process layer** — `ProcessManager` gains a `resolveRepoConfig()` helper that, given a `repoId`, looks up the repo record and clones the config with overridden `github.owner`/`github.repo`. The cloned config shares the same PAT/LLM settings — only the owner/repo change. This works because GitHub PATs and App installation tokens typically have cross-repo access.
+
+### How repo resolution works in practice
+
+```
+ProcessManager.startAnalysis(issueNumber, { repoId: 5 })
+  → creates AgentProcess with default owner/repo (from config)
+  → fires process_started event
+  → async runAnalysis():
+      → resolveRepoConfig(repoId=5)
+      → looks up repo 5 → { owner: 'acme', repo: 'widgets' }
+      → clones config with overridden github.owner/repo
+      → if owner/repo changed, updates proc and fires process_updated
+      → passes resolved config to runArchitect()
+```
+
+The resolution is deliberately async and happens inside `runAnalysis`/`runReview`, not in the sync `startAnalysis`/`startReview` methods. This means the initial `process_started` SSE event may briefly show the default repo, but `process_updated` fires immediately after resolution. This avoids making the start methods async (which would change the public API).
+
+### Frontend changes
+
+The dashboard gained three components:
+- **ReposPanel** — table listing all repos with Active/Inactive chips and a Deactivate button
+- **AddRepoDialog** — simple form with owner + repository text fields, client-side duplicate error handling
+- **Repo selector** in NewProcessDialog — a `Select` dropdown (only shown when >1 active repo) that passes `repoId` through to process creation
+
+The AppBar also shows a repo count badge: `owner/repo (+N more)` when multiple repos are active.
+
+### Design decisions
+
+**Why soft-delete instead of hard delete?** Repos have FKs from many tables (processes, usage records, poll state). Hard-deleting a repo would either cascade-delete all that data or fail with FK violations. Soft-delete (`is_active = FALSE`) preserves historical data while hiding the repo from active use.
+
+**Why `501 Not Implemented` for no-database mode?** The routes exist in the Express app regardless of database config, but they can't function without one. 501 signals "the server recognizes the request but can't fulfill it" — more informative than 404 (which would suggest the route doesn't exist) or 500 (which suggests a bug).
+
+**Why not validate PAT cross-repo access?** The system doesn't verify that the configured PAT or App token has access to a newly added repo. This is deliberate — validation would require an API call on every repo add, and the error would surface naturally when an agent tries to use the repo (e.g., failing to fetch issues). The user can use `test-access --issue N` against the repo to verify manually.
+
+**Why clone config instead of mutating?** `resolveRepoConfig()` returns a new config object with `{ ...this.config, github: { ...this.config.github, owner, repo } }`. This prevents mutation of the shared config, which could affect concurrent processes targeting different repos.
+
+### Connections to previous entries
+
+- **Entry 50** (PostgreSQL Persistence): The multi-repo schema was designed in v1.7.0 but never exposed to users. This entry unlocks that schema for actual multi-repo use.
+- **Entry 47** (Web Dashboard): The Repos tab is the third tab after Processes and Usage, following the same MUI component patterns.
+- **Entry 48** (Parallel Subagent Support): Per-process repo resolution is orthogonal to parallelism — each parallel subagent inherits the resolved config from its parent process.

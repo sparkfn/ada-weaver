@@ -6,6 +6,7 @@ import { runReviewSingle } from './reviewer-agent.js';
 import type { UsageService } from './usage-service.js';
 import type { ProcessRepository } from './process-repository.js';
 import type { IssueContextRepository } from './issue-context-repository.js';
+import type { RepoRepository } from './repo-repository.js';
 
 // ── Interfaces ───────────────────────────────────────────────────────────────
 
@@ -56,14 +57,27 @@ export class ProcessManager extends EventEmitter {
   private processRepo?: ProcessRepository;
   private issueContextRepo?: IssueContextRepository;
   private repoId: number;
+  private repoRepo?: RepoRepository;
 
-  constructor(config: Config, usageService?: UsageService, processRepo?: ProcessRepository, issueContextRepo?: IssueContextRepository, repoId?: number) {
+  constructor(config: Config, usageService?: UsageService, processRepo?: ProcessRepository, issueContextRepo?: IssueContextRepository, repoId?: number, repoRepo?: RepoRepository) {
     super();
     this.config = config;
     this.usageService = usageService;
     this.processRepo = processRepo;
     this.issueContextRepo = issueContextRepo;
     this.repoId = repoId ?? 0;
+    this.repoRepo = repoRepo;
+  }
+
+  private async resolveRepoConfig(repoId?: number): Promise<{ config: Config; owner: string; repo: string; resolvedRepoId: number }> {
+    if (repoId !== undefined && repoId !== this.repoId && this.repoRepo) {
+      const repoRecord = await Promise.resolve(this.repoRepo.getById(repoId));
+      if (repoRecord) {
+        const cloned = { ...this.config, github: { ...this.config.github, owner: repoRecord.owner, repo: repoRecord.repo } };
+        return { config: cloned, owner: repoRecord.owner, repo: repoRecord.repo, resolvedRepoId: repoId };
+      }
+    }
+    return { config: this.config, owner: this.config.github.owner, repo: this.config.github.repo, resolvedRepoId: this.repoId };
   }
 
   private persistSave(proc: AgentProcess): void {
@@ -82,7 +96,7 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
-  continueAnalysis(issueNumber: number, prNumber: number, branchName: string, humanFeedback?: string): AgentProcess {
+  continueAnalysis(issueNumber: number, prNumber: number, branchName: string, humanFeedback?: string, repoId?: number): AgentProcess {
     const id = `continue-${issueNumber}-${Date.now()}`;
     const proc: AgentProcess = {
       id,
@@ -105,12 +119,13 @@ export class ProcessManager extends EventEmitter {
 
     this.runAnalysis(proc, controller.signal, {
       continueContext: { prNumber, branchName, humanFeedback },
+      repoId,
     }).catch(() => {});
 
     return { ...proc };
   }
 
-  startAnalysis(issueNumber: number, options: { dryRun?: boolean } = {}): AgentProcess {
+  startAnalysis(issueNumber: number, options: { dryRun?: boolean; repoId?: number } = {}): AgentProcess {
     const id = `analyze-${issueNumber}-${Date.now()}`;
     const proc: AgentProcess = {
       id,
@@ -130,12 +145,12 @@ export class ProcessManager extends EventEmitter {
 
     this.emitEvent('process_started', proc);
 
-    this.runAnalysis(proc, controller.signal, options).catch(() => {});
+    this.runAnalysis(proc, controller.signal, { dryRun: options.dryRun, repoId: options.repoId }).catch(() => {});
 
     return { ...proc };
   }
 
-  startReview(prNumber: number): AgentProcess {
+  startReview(prNumber: number, options: { repoId?: number } = {}): AgentProcess {
     const id = `review-${prNumber}-${Date.now()}`;
     const proc: AgentProcess = {
       id,
@@ -155,7 +170,7 @@ export class ProcessManager extends EventEmitter {
 
     this.emitEvent('process_started', proc);
 
-    this.runReview(proc, controller.signal).catch(() => {});
+    this.runReview(proc, controller.signal, options.repoId).catch(() => {});
 
     return { ...proc };
   }
@@ -237,11 +252,18 @@ export class ProcessManager extends EventEmitter {
   private async runAnalysis(
     proc: AgentProcess,
     signal: AbortSignal,
-    options: { dryRun?: boolean; continueContext?: ContinueContext } = {},
+    options: { dryRun?: boolean; continueContext?: ContinueContext; repoId?: number } = {},
   ): Promise<void> {
     const restore = this.interceptConsole(proc);
 
     try {
+      const { config: resolvedConfig, owner, repo, resolvedRepoId } = await this.resolveRepoConfig(options.repoId);
+      if (proc.owner !== owner || proc.repo !== repo) {
+        proc.owner = owner;
+        proc.repo = repo;
+        this.emitEvent('process_updated', proc);
+      }
+
       const activeRunPhases = new Map<string, string>();
 
       const onProgress = (update: ProgressUpdate) => {
@@ -258,7 +280,7 @@ export class ProcessManager extends EventEmitter {
         this.emitEvent('process_updated', proc);
       };
 
-      const result = await runArchitect(this.config, proc.issueNumber!, {
+      const result = await runArchitect(resolvedConfig, proc.issueNumber!, {
         dryRun: options.dryRun,
         onProgress,
         signal,
@@ -266,7 +288,7 @@ export class ProcessManager extends EventEmitter {
         usageService: this.usageService,
         processId: proc.id,
         contextRepo: this.issueContextRepo,
-        repoId: this.repoId,
+        repoId: resolvedRepoId,
       });
 
       if (signal.aborted) return; // already marked cancelled
@@ -292,11 +314,18 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
-  private async runReview(proc: AgentProcess, signal: AbortSignal): Promise<void> {
+  private async runReview(proc: AgentProcess, signal: AbortSignal, repoId?: number): Promise<void> {
     const restore = this.interceptConsole(proc);
 
     try {
-      const result = await runReviewSingle(this.config, proc.prNumber!, {
+      const { config: resolvedConfig, owner, repo } = await this.resolveRepoConfig(repoId);
+      if (proc.owner !== owner || proc.repo !== repo) {
+        proc.owner = owner;
+        proc.repo = repo;
+        this.emitEvent('process_updated', proc);
+      }
+
+      const result = await runReviewSingle(resolvedConfig, proc.prNumber!, {
         signal,
         usageService: this.usageService,
         processId: proc.id,

@@ -46,6 +46,7 @@
       Dialog, DialogTitle, DialogContent, DialogActions,
       TextField, FormControlLabel, Checkbox, Tooltip,
       CircularProgress, Alert, Stepper, Step, StepLabel,
+      Select, MenuItem, FormControl, InputLabel,
     } from '@mui/material';
 
     const { useState, useEffect, useRef, useCallback, createElement: h, Fragment } = React;
@@ -428,34 +429,39 @@
 
     // ── NewProcessDialog ───────────────────────────────────────────────────────
 
-    function NewProcessDialog({ open, onClose, onSubmit }) {
+    function NewProcessDialog({ open, onClose, onSubmit, repos }) {
       const [tab, setTab] = useState(0);
       const [issueNumber, setIssueNumber] = useState('');
       const [prNumber, setPrNumber] = useState('');
       const [dryRun, setDryRun] = useState(false);
+      const [selectedRepoId, setSelectedRepoId] = useState('');
       // Continue tab fields
       const [contIssue, setContIssue] = useState('');
       const [contPr, setContPr] = useState('');
       const [contBranch, setContBranch] = useState('');
 
+      const activeRepos = (repos || []).filter(r => r.isActive);
+
       function handleSubmit() {
+        const repoId = selectedRepoId !== '' ? Number(selectedRepoId) : undefined;
         if (tab === 0) {
           const num = parseInt(issueNumber, 10);
           if (!num || num < 1) return;
-          onSubmit({ type: 'analyze', issueNumber: num, dryRun });
+          onSubmit({ type: 'analyze', issueNumber: num, dryRun, repoId });
         } else if (tab === 1) {
           const num = parseInt(prNumber, 10);
           if (!num || num < 1) return;
-          onSubmit({ type: 'review', prNumber: num });
+          onSubmit({ type: 'review', prNumber: num, repoId });
         } else if (tab === 2) {
           const inum = parseInt(contIssue, 10);
           const pnum = parseInt(contPr, 10);
           if (!inum || inum < 1 || !pnum || pnum < 1 || !contBranch.trim()) return;
-          onSubmit({ type: 'continue', issueNumber: inum, prNumber: pnum, branchName: contBranch.trim() });
+          onSubmit({ type: 'continue', issueNumber: inum, prNumber: pnum, branchName: contBranch.trim(), repoId });
         }
         setIssueNumber('');
         setPrNumber('');
         setDryRun(false);
+        setSelectedRepoId('');
         setContIssue('');
         setContPr('');
         setContBranch('');
@@ -474,6 +480,21 @@
       return h(Dialog, { open, onClose, maxWidth: 'xs', fullWidth: true, PaperProps: { sx: { background: '#16213e' } } },
         h(DialogTitle, null, 'Start New Process'),
         h(DialogContent, null,
+          activeRepos.length > 1
+            ? h(FormControl, { fullWidth: true, size: 'small', sx: { mb: 2, mt: 1 } },
+                h(InputLabel, null, 'Repository'),
+                h(Select, {
+                  value: selectedRepoId,
+                  label: 'Repository',
+                  onChange: (e) => setSelectedRepoId(e.target.value),
+                },
+                  h(MenuItem, { value: '' }, 'Default (from config)'),
+                  ...activeRepos.map(r =>
+                    h(MenuItem, { key: r.id, value: String(r.id) }, `${r.owner}/${r.repo}`)
+                  ),
+                ),
+              )
+            : null,
           h(Tabs, { value: tab, onChange: (_, v) => setTab(v), sx: { mb: 2 } },
             h(Tab, { label: 'Analyze Issue' }),
             h(Tab, { label: 'Review PR' }),
@@ -751,6 +772,129 @@
       );
     }
 
+    // ── AddRepoDialog ──────────────────────────────────────────────────────────
+
+    function AddRepoDialog({ open, onClose, onCreated }) {
+      const [owner, setOwner] = useState('');
+      const [repo, setRepo] = useState('');
+      const [error, setError] = useState('');
+
+      function handleSubmit() {
+        if (!owner.trim() || !repo.trim()) return;
+        setError('');
+        fetch('/api/repos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ owner: owner.trim(), repo: repo.trim() }),
+        })
+          .then(async (res) => {
+            if (res.status === 409) { setError('Repo already exists'); return; }
+            if (!res.ok) { setError('Failed to add repo'); return; }
+            const record = await res.json();
+            onCreated(record);
+            setOwner('');
+            setRepo('');
+            onClose();
+          })
+          .catch(() => setError('Network error'));
+      }
+
+      return h(Dialog, { open, onClose, maxWidth: 'xs', fullWidth: true, PaperProps: { sx: { background: '#16213e' } } },
+        h(DialogTitle, null, 'Add Repository'),
+        h(DialogContent, null,
+          error ? h(Alert, { severity: 'error', sx: { mb: 2 } }, error) : null,
+          h(TextField, {
+            label: 'Owner',
+            fullWidth: true,
+            value: owner,
+            onChange: (e) => setOwner(e.target.value),
+            sx: { mb: 2, mt: 1 },
+            autoFocus: true,
+            placeholder: 'e.g. octocat',
+          }),
+          h(TextField, {
+            label: 'Repository',
+            fullWidth: true,
+            value: repo,
+            onChange: (e) => setRepo(e.target.value),
+            placeholder: 'e.g. hello-world',
+          }),
+        ),
+        h(DialogActions, null,
+          h(Button, { onClick: onClose }, 'Cancel'),
+          h(Button, { variant: 'contained', onClick: handleSubmit, disabled: !owner.trim() || !repo.trim() }, 'Add'),
+        ),
+      );
+    }
+
+    // ── ReposPanel ────────────────────────────────────────────────────────────
+
+    function ReposPanel({ repos, onReposChange }) {
+      const [addOpen, setAddOpen] = useState(false);
+
+      function handleDeactivate(id) {
+        fetch(`/api/repos/${id}`, { method: 'DELETE' })
+          .then((res) => {
+            if (res.ok) {
+              onReposChange(repos.map(r => r.id === id ? { ...r, isActive: false } : r));
+            }
+          })
+          .catch(() => {});
+      }
+
+      return h(Box, null,
+        h(Box, { sx: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 } },
+          h(Typography, { variant: 'h6' }, 'Repositories'),
+          h(Button, { variant: 'contained', size: 'small', onClick: () => setAddOpen(true) }, '+ Add Repo'),
+        ),
+        repos.length === 0
+          ? h(Box, { sx: { p: 4, textAlign: 'center' } },
+              h(Typography, { color: 'text.secondary' }, 'No repositories configured. Click "+ Add Repo" to add one.')
+            )
+          : h(TableContainer, { component: Paper, sx: { background: '#16213e' } },
+              h(Table, { size: 'small' },
+                h(TableHead, null,
+                  h(TableRow, null,
+                    h(TableCell, null, 'Owner / Repo'),
+                    h(TableCell, null, 'Status'),
+                    h(TableCell, null, 'Added'),
+                    h(TableCell, { align: 'right' }, 'Actions'),
+                  ),
+                ),
+                h(TableBody, null,
+                  repos.map(r =>
+                    h(TableRow, { key: r.id },
+                      h(TableCell, null, `${r.owner}/${r.repo}`),
+                      h(TableCell, null,
+                        h(Chip, {
+                          label: r.isActive ? 'Active' : 'Inactive',
+                          color: r.isActive ? 'success' : 'default',
+                          size: 'small',
+                        })
+                      ),
+                      h(TableCell, null, new Date(r.addedAt).toLocaleDateString()),
+                      h(TableCell, { align: 'right' },
+                        r.isActive
+                          ? h(Button, {
+                              size: 'small',
+                              color: 'error',
+                              onClick: () => handleDeactivate(r.id),
+                            }, 'Deactivate')
+                          : null,
+                      ),
+                    )
+                  ),
+                ),
+              ),
+            ),
+        h(AddRepoDialog, {
+          open: addOpen,
+          onClose: () => setAddOpen(false),
+          onCreated: (record) => onReposChange([...repos, record]),
+        }),
+      );
+    }
+
     // ── App ────────────────────────────────────────────────────────────────────
 
     function App() {
@@ -763,11 +907,13 @@
       const [dialogOpen, setDialogOpen] = useState(false);
       const [processLogs, setProcessLogs] = useState({});
       const [usageRefreshKey, setUsageRefreshKey] = useState(0);
+      const [repos, setRepos] = useState([]);
 
       // Fetch initial data
       useEffect(() => {
         fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {});
         fetch('/api/processes').then(r => r.json()).then(setProcesses).catch(() => {});
+        fetch('/api/repos?activeOnly=false').then(r => r.json()).then(setRepos).catch(() => {});
       }, []);
 
       // SSE connection with auto-reconnect
@@ -870,7 +1016,7 @@
         await fetch(`/api/processes/${id}`, { method: 'DELETE' }).catch(() => {});
       }
 
-      async function handleNewProcess({ type, issueNumber, prNumber, branchName, dryRun }) {
+      async function handleNewProcess({ type, issueNumber, prNumber, branchName, dryRun, repoId }) {
         const urlMap = {
           analyze: '/api/processes/analyze',
           review: '/api/processes/review',
@@ -878,9 +1024,9 @@
         };
         const url = urlMap[type];
         let body;
-        if (type === 'analyze') body = { issueNumber, dryRun };
-        else if (type === 'review') body = { prNumber };
-        else body = { issueNumber, prNumber, branchName };
+        if (type === 'analyze') body = { issueNumber, dryRun, repoId };
+        else if (type === 'review') body = { prNumber, repoId };
+        else body = { issueNumber, prNumber, branchName, repoId };
 
         try {
           const res = await fetch(url, {
@@ -909,7 +1055,9 @@
             h(Typography, { variant: 'h6', sx: { flexGrow: 0, mr: 2, fontWeight: 600 } }, 'Deep Agents Dashboard'),
             status
               ? h(Chip, {
-                  label: `${status.owner}/${status.repo}`,
+                  label: repos.filter(r => r.isActive).length > 1
+                    ? `${status.owner}/${status.repo} (+${repos.filter(r => r.isActive).length - 1} more)`
+                    : `${status.owner}/${status.repo}`,
                   size: 'small',
                   variant: 'outlined',
                   sx: { mr: 2, borderColor: '#0f3460' },
@@ -941,10 +1089,13 @@
                 h(Tabs, { value: tab, onChange: (_, v) => setTab(v), sx: { mb: 2 } },
                   h(Tab, { label: 'Processes' }),
                   h(Tab, { label: 'Usage' }),
+                  h(Tab, { label: 'Repos' }),
                 ),
                 tab === 0
                   ? h(ProcessesTable, { processes, onSelect: handleSelect, onCancel: handleCancel })
-                  : h(UsagePanel, { refreshKey: usageRefreshKey }),
+                  : tab === 1
+                    ? h(UsagePanel, { refreshKey: usageRefreshKey })
+                    : h(ReposPanel, { repos, onReposChange: setRepos }),
               ),
         ),
 
@@ -974,6 +1125,7 @@
           open: dialogOpen,
           onClose: () => setDialogOpen(false),
           onSubmit: handleNewProcess,
+          repos,
         }),
       );
     }

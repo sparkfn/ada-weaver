@@ -4,6 +4,7 @@ import { createDashboardApp, createUnifiedApp } from '../src/dashboard.js';
 import type express from 'express';
 import type { ProcessManager } from '../src/process-manager.js';
 import type { UsageService } from '../src/usage-service.js';
+import type { RepoRecord, RepoRepository } from '../src/repo-repository.js';
 
 // Mock dependencies so no real agents or GitHub calls happen
 vi.mock('../src/architect.js', () => ({
@@ -556,5 +557,180 @@ describe('Unified App', () => {
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('message');
     });
+  });
+});
+
+// ── MockRepoRepository ──────────────────────────────────────────────────────
+
+class MockRepoRepository implements RepoRepository {
+  private repos: RepoRecord[] = [];
+  private nextId = 1;
+
+  getById(id: number): RepoRecord | undefined {
+    return this.repos.find(r => r.id === id);
+  }
+
+  getByOwnerRepo(owner: string, repo: string): RepoRecord | undefined {
+    return this.repos.find(r => r.owner === owner && r.repo === repo);
+  }
+
+  ensureRepo(owner: string, repo: string): RepoRecord {
+    const existing = this.getByOwnerRepo(owner, repo);
+    if (existing) return existing;
+    return this.create(owner, repo);
+  }
+
+  list(activeOnly = true): RepoRecord[] {
+    return activeOnly ? this.repos.filter(r => r.isActive) : [...this.repos];
+  }
+
+  create(owner: string, repo: string, configJson?: Record<string, unknown>): RepoRecord {
+    if (this.repos.some(r => r.owner === owner && r.repo === repo)) {
+      const err: any = new Error('duplicate key');
+      err.code = '23505';
+      throw err;
+    }
+    const record: RepoRecord = {
+      id: this.nextId++,
+      owner,
+      repo,
+      isActive: true,
+      addedAt: new Date().toISOString(),
+      configJson,
+    };
+    this.repos.push(record);
+    return record;
+  }
+
+  update(id: number, fields: { configJson?: Record<string, unknown> }): RepoRecord | undefined {
+    const repo = this.repos.find(r => r.id === id);
+    if (!repo) return undefined;
+    if (fields.configJson !== undefined) repo.configJson = fields.configJson;
+    return { ...repo };
+  }
+
+  deactivate(id: number): boolean {
+    const repo = this.repos.find(r => r.id === id && r.isActive);
+    if (!repo) return false;
+    repo.isActive = false;
+    return true;
+  }
+}
+
+// ── Repo CRUD Tests ─────────────────────────────────────────────────────────
+
+describe('Repo CRUD API', () => {
+  let app: express.Express;
+  let repoRepository: MockRepoRepository;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    repoRepository = new MockRepoRepository();
+    const result = createDashboardApp(mockConfig, { repoRepository });
+    app = result.app;
+  });
+
+  describe('GET /api/repos', () => {
+    it('returns empty list initially', async () => {
+      const res = await inject(app, 'GET', '/api/repos');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it('returns repos after creation', async () => {
+      repoRepository.create('owner1', 'repo1');
+      const res = await inject(app, 'GET', '/api/repos');
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0].owner).toBe('owner1');
+    });
+  });
+
+  describe('POST /api/repos', () => {
+    it('creates a repo (201)', async () => {
+      const res = await inject(app, 'POST', '/api/repos', { owner: 'acme', repo: 'widgets' });
+      expect(res.status).toBe(201);
+      expect(res.body.owner).toBe('acme');
+      expect(res.body.repo).toBe('widgets');
+      expect(res.body.id).toBeDefined();
+    });
+
+    it('returns 409 for duplicate', async () => {
+      await inject(app, 'POST', '/api/repos', { owner: 'acme', repo: 'widgets' });
+      const res = await inject(app, 'POST', '/api/repos', { owner: 'acme', repo: 'widgets' });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toContain('already exists');
+    });
+
+    it('returns 400 for missing owner', async () => {
+      const res = await inject(app, 'POST', '/api/repos', { repo: 'widgets' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('owner');
+    });
+
+    it('returns 400 for missing repo', async () => {
+      const res = await inject(app, 'POST', '/api/repos', { owner: 'acme' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('repo');
+    });
+  });
+
+  describe('PATCH /api/repos/:id', () => {
+    it('updates configJson', async () => {
+      const created = await inject(app, 'POST', '/api/repos', { owner: 'acme', repo: 'widgets' });
+      const res = await inject(app, 'PATCH', `/api/repos/${created.body.id}`, { configJson: { key: 'value' } });
+      expect(res.status).toBe(200);
+      expect(res.body.configJson).toEqual({ key: 'value' });
+    });
+
+    it('returns 404 for unknown id', async () => {
+      const res = await inject(app, 'PATCH', '/api/repos/999', { configJson: {} });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe('DELETE /api/repos/:id', () => {
+    it('deactivates a repo', async () => {
+      const created = await inject(app, 'POST', '/api/repos', { owner: 'acme', repo: 'widgets' });
+      const res = await inject(app, 'DELETE', `/api/repos/${created.body.id}`);
+      expect(res.status).toBe(200);
+      expect(res.body.deactivated).toBe(true);
+    });
+
+    it('returns 404 for already deactivated', async () => {
+      const created = await inject(app, 'POST', '/api/repos', { owner: 'acme', repo: 'widgets' });
+      await inject(app, 'DELETE', `/api/repos/${created.body.id}`);
+      const res = await inject(app, 'DELETE', `/api/repos/${created.body.id}`);
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe('process routes accept repoId', () => {
+    it('POST /api/processes/analyze accepts repoId', async () => {
+      const res = await inject(app, 'POST', '/api/processes/analyze', { issueNumber: 42, repoId: 1 });
+      expect(res.status).toBe(201);
+      expect(res.body.type).toBe('analyze');
+    });
+  });
+});
+
+describe('Repo CRUD without database', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const result = createDashboardApp(mockConfig);
+    app = result.app;
+  });
+
+  it('GET /api/repos returns 501', async () => {
+    const res = await inject(app, 'GET', '/api/repos');
+    expect(res.status).toBe(501);
+    expect(res.body.error).toContain('database');
+  });
+
+  it('POST /api/repos returns 501', async () => {
+    const res = await inject(app, 'POST', '/api/repos', { owner: 'a', repo: 'b' });
+    expect(res.status).toBe(501);
   });
 });

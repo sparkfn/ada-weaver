@@ -18,6 +18,9 @@ export interface RepoRepository {
   getByOwnerRepo(owner: string, repo: string): RepoRecord | undefined | Promise<RepoRecord | undefined>;
   ensureRepo(owner: string, repo: string): RepoRecord | Promise<RepoRecord>;
   list(activeOnly?: boolean): RepoRecord[] | Promise<RepoRecord[]>;
+  create(owner: string, repo: string, configJson?: Record<string, unknown>): RepoRecord | Promise<RepoRecord>;
+  update(id: number, fields: { configJson?: Record<string, unknown> }): RepoRecord | undefined | Promise<RepoRecord | undefined>;
+  deactivate(id: number): boolean | Promise<boolean>;
 }
 
 /**
@@ -57,5 +60,17 @@ export class StaticRepoRepository implements RepoRepository {
 
   list(_activeOnly?: boolean): RepoRecord[] {
     return [{ ...this.repo }];
+  }
+
+  create(): RepoRecord {
+    throw new Error('StaticRepoRepository does not support create');
+  }
+
+  update(): RepoRecord | undefined {
+    throw new Error('StaticRepoRepository does not support update');
+  }
+
+  deactivate(): boolean {
+    throw new Error('StaticRepoRepository does not support deactivate');
   }
 }

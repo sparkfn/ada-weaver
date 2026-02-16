@@ -539,7 +539,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-673 tests across 21 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+702 tests across 22 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 
@@ -585,15 +585,15 @@ learning-deep-agents/
     utils.ts          -- Retry with exponential backoff for API calls
     chat-agent.ts     -- Chat agent for human-agent interaction (read-only tools + checkpointer)
     listener.ts       -- Express webhook server, dialog server, /prompt handler, HMAC-SHA256 verification
-    process-manager.ts -- EventEmitter-based agent process lifecycle manager
-    dashboard.ts      -- Express server for web dashboard (REST API + SSE + unified serve mode)
+    process-manager.ts -- EventEmitter-based agent process lifecycle manager (per-process repo override)
+    dashboard.ts      -- Express server for web dashboard (REST API + SSE + repo CRUD + unified serve mode)
     usage-types.ts    -- TypeScript interfaces for LLM usage tracking (LLMUsageRecord, AgentRole, etc.)
     usage-pricing.ts  -- Per-model token pricing data (Anthropic + OpenAI models)
     usage-repository.ts -- In-memory usage record storage with filtering and aggregation
     usage-service.ts  -- Usage recording, summarization, and groupBy service layer
     poll-repository.ts    -- PollRepository interface + FilePollRepository (file-based fallback)
     process-repository.ts -- ProcessRepository interface + InMemoryProcessRepository (in-memory fallback)
-    repo-repository.ts    -- RepoRepository interface + StaticRepoRepository (env-var fallback)
+    repo-repository.ts    -- RepoRepository interface (CRUD) + StaticRepoRepository (env-var fallback)
     db/
       connection.ts       -- PostgreSQL pool singleton (from DATABASE_URL or PG_* env vars)
       migrate.ts          -- Migration runner (reads SQL files, applies in transactions)

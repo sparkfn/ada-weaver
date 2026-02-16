@@ -9,6 +9,37 @@
 
 ---
 
+## v2.5.0 — 2026-02-16
+
+**Multi-Repo CRUD.** The dashboard now supports managing multiple GitHub repositories. While the database schema already supported multi-repo (all tables FK to `repos.id`), there was no way to add or manage repos — only the env-var repo was auto-upserted on startup. This release adds a full CRUD interface for repos, a Repos tab in the dashboard, and per-process repo selection so any process can target a non-default repo.
+
+### Added
+- **Repo CRUD API** — 4 new endpoints in `src/dashboard.ts`:
+  - `GET /api/repos` — list repos (with `?activeOnly=true/false` filter)
+  - `POST /api/repos` — create a repo (409 on duplicate via PG unique violation `23505`)
+  - `PATCH /api/repos/:id` — update repo `configJson`
+  - `DELETE /api/repos/:id` — soft-deactivate a repo (`is_active = FALSE`)
+  - All routes return 501 when no database is configured
+- **`create`, `update`, `deactivate` methods** on `RepoRepository` interface (`src/repo-repository.ts`)
+- **PostgreSQL implementations** in `src/db/pg-repo-repository.ts` — INSERT, UPDATE config_json, soft-delete
+- **`StaticRepoRepository` stubs** — throw descriptive errors (no DB = no write support)
+- **`resolveRepoConfig()` helper** in `ProcessManager` — looks up a repo by id, clones the config with overridden `owner`/`repo`, shares the same token/LLM settings
+- **Repos tab** in dashboard (`static/dashboard.html`) — table with Owner/Repo, Active/Inactive chip, Added date, Deactivate button
+- **`AddRepoDialog`** component — owner + repository text fields with duplicate detection
+- **Repo selector** in `NewProcessDialog` — `Select` dropdown populated from active repos, passes `repoId` to process creation
+- **AppBar repo count** — shows `owner/repo (+N more)` when multiple repos exist
+- 12 new tests in `tests/dashboard.test.ts` — `MockRepoRepository` (in-memory with duplicate detection), GET/POST/PATCH/DELETE routes, 409/400/404 edge cases, 501 without database, process routes with `repoId` — **702 tests total**
+
+### Changed
+- `DashboardOptions` interface gains `repoRepository?: RepoRepository`
+- `ProcessManager` constructor accepts 6th param `repoRepo?: RepoRepository`; `startAnalysis`, `startReview`, `continueAnalysis` accept optional `repoId`
+- `runAnalysis`/`runReview` resolve repo config before calling agents; only emit `process_updated` when repo actually changes
+- Process creation routes (`POST /api/processes/analyze`, `/review`, `/continue`) accept optional `repoId` in request body
+- `src/cli.ts` passes `repoRepository` to `startUnifiedServer`/`startDashboardServer` (only when `config.database` is set)
+- Dashboard frontend adds `Select`, `MenuItem`, `FormControl`, `InputLabel` MUI imports
+
+---
+
 ## v2.4.0 — 2026-02-16
 
 **Tool Output Context Management.** Two-layer defense against oversized tool outputs blowing the LLM context window. Tool-level caps truncate the 4 worst offenders (bash, grep, issue bodies, CI summaries) before output leaves the handler. A universal safety-net wrapper (`wrapWithOutputCap`) is applied at all tool assembly points as the outermost layer.

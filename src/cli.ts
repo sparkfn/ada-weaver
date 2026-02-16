@@ -575,6 +575,7 @@ async function main() {
         usageRepository: repos.usageRepository,
         processRepository: repos.processRepository,
         issueContextRepository: repos.issueContextRepository,
+        repoRepository: config.database ? repos.repoRepository : undefined,
         repoId: repos.repoId,
       });
       // Server runs until process is killed (SIGTERM/SIGINT)
@@ -623,6 +624,7 @@ async function main() {
         usageRepository: dashRepos.usageRepository,
         processRepository: dashRepos.processRepository,
         issueContextRepository: dashRepos.issueContextRepository,
+        repoRepository: config.database ? dashRepos.repoRepository : undefined,
         repoId: dashRepos.repoId,
       });
       // Server runs until process is killed (SIGTERM/SIGINT)

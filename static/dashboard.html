@@ -357,7 +357,6 @@
               h(TableCell, null, '#'),
               h(TableCell, null, 'Phase'),
               h(TableCell, null, 'Time'),
-              h(TableCell, { align: 'right' }, 'Actions'),
             ),
           ),
           h(TableBody, null,
@@ -368,7 +367,20 @@
                 sx: { cursor: 'pointer', '&:hover': { background: '#1e2a4a' } },
                 onClick: () => onSelect(proc),
               },
-                h(TableCell, null, h(StatusChip, { status: proc.status })),
+                h(TableCell, null,
+                  h(Box, { sx: { display: 'flex', alignItems: 'center', gap: 0.5 } },
+                    h(StatusChip, { status: proc.status }),
+                    proc.status === 'running'
+                      ? h(Tooltip, { title: 'Cancel' },
+                          h(IconButton, {
+                            size: 'small',
+                            color: 'error',
+                            onClick: (e) => { e.stopPropagation(); onCancel(proc.id); },
+                          }, '\u2716')
+                        )
+                      : null,
+                  ),
+                ),
                 h(TableCell, null, proc.type),
                 h(TableCell, null,
                   proc.type === 'analyze' ? `Issue #${proc.issueNumber}` : `PR #${proc.prNumber}`
@@ -385,17 +397,6 @@
                       : '\u2014'
                 ),
                 h(TableCell, null, h(ElapsedTime, { startedAt: proc.startedAt, completedAt: proc.completedAt, status: proc.status })),
-                h(TableCell, { align: 'right' },
-                  proc.status === 'running'
-                    ? h(Tooltip, { title: 'Cancel' },
-                        h(IconButton, {
-                          size: 'small',
-                          color: 'error',
-                          onClick: (e) => { e.stopPropagation(); onCancel(proc.id); },
-                        }, '\u2716')
-                      )
-                    : null,
-                ),
               )
             ),
           ),

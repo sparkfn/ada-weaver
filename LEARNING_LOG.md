@@ -6585,6 +6585,19 @@ For multi-agent with iterations (60 calls):
 
 **Why clone config instead of mutating?** `resolveRepoConfig()` returns a new config object with `{ ...this.config, github: { ...this.config.github, owner, repo } }`. This prevents mutation of the shared config, which could affect concurrent processes targeting different repos.
 
+### Retroactive cost recalculation
+
+A subtle issue: `estimatedCost` was computed once at record creation time in `UsageService.record()`. Records created before a model was added to the pricing table (e.g., gpt-5.2 runs from before this version) had `estimatedCost: 0` permanently baked in. The fix: `UsageService.query()`, `summarize()`, and `groupBy()` now recalculate cost at query time via a `recalcCost()` method. If the live calculation returns >0 and differs from stored cost, the returned record uses the live value. This means pricing changes (hardcoded or DB overrides) apply retroactively to all historical records.
+
+### Dashboard UI refinements
+
+The Processes and Pricing panels both had an "Actions" column that added visual clutter. In both cases, the rows were already clickable for their primary action (viewing process details / opening the override dialog). The Actions columns were removed:
+
+- **Processes table** — the cancel button (only visible for running processes) moved inline next to the Status chip, using `stopPropagation` so clicking cancel doesn't trigger the row click
+- **Pricing built-in defaults** — the "Override" button was replaced by making the entire row clickable (with `hover: true` and `cursor: pointer`); an "Overridden" chip shows in a compact Status column when a DB override exists
+
+This is a pattern worth noting: when a table row is already clickable, a separate Actions column with a single button is redundant. Move infrequent actions inline (e.g., next to an existing chip) and let the row click handle the primary action.
+
 ### Connections to previous entries
 
 - **Entry 50** (PostgreSQL Persistence): The multi-repo schema was designed in v1.7.0 but never exposed to users. This entry unlocks that schema for actual multi-repo use.

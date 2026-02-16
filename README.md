@@ -586,11 +586,12 @@ learning-deep-agents/
     chat-agent.ts     -- Chat agent for human-agent interaction (read-only tools + checkpointer)
     listener.ts       -- Express webhook server, dialog server, /prompt handler, HMAC-SHA256 verification
     process-manager.ts -- EventEmitter-based agent process lifecycle manager (per-process repo override)
-    dashboard.ts      -- Express server for web dashboard (REST API + SSE + repo CRUD + unified serve mode)
+    dashboard.ts      -- Express server for web dashboard (REST API + SSE + repo CRUD + pricing CRUD + unified serve mode)
     usage-types.ts    -- TypeScript interfaces for LLM usage tracking (LLMUsageRecord, AgentRole, etc.)
-    usage-pricing.ts  -- Per-model token pricing data (Anthropic + OpenAI models)
+    usage-pricing.ts  -- Per-model token pricing with DB override support (setPricingLookup/buildPricingLookup)
     usage-repository.ts -- In-memory usage record storage with filtering and aggregation
-    usage-service.ts  -- Usage recording, summarization, and groupBy service layer
+    usage-service.ts  -- Usage recording, summarization, and groupBy with live cost recalculation
+    pricing-repository.ts -- PricingRepository interface (CRUD) + InMemoryPricingRepository
     poll-repository.ts    -- PollRepository interface + FilePollRepository (file-based fallback)
     process-repository.ts -- ProcessRepository interface + InMemoryProcessRepository (in-memory fallback)
     repo-repository.ts    -- RepoRepository interface (CRUD) + StaticRepoRepository (env-var fallback)
@@ -602,8 +603,10 @@ learning-deep-agents/
       pg-poll-repository.ts    -- PostgresPollRepository (poll_state + issue_actions)
       pg-usage-repository.ts   -- PostgresUsageRepository (llm_usage CRUD + aggregations)
       pg-process-repository.ts -- PostgresProcessRepository (agent_processes persistence)
+      pg-pricing-repository.ts -- PostgresPricingRepository (model pricing overrides)
       migrations/
         001_initial_schema.sql -- Full schema: repos, poll_state, issue_actions, agent_processes, llm_usage
+        003_pricing.sql        -- Model pricing override table
   tests/
     architect.test.ts -- Architect supervisor, subagent factories, extractTaskInput, system prompt tests
     single-agent.test.ts -- Single-agent system prompt, tool assembly, dry-run, context tool tests
@@ -622,7 +625,8 @@ learning-deep-agents/
     listener.test.ts  -- Webhook endpoint, signature verification, /prompt handler tests
     process-manager.test.ts -- Process lifecycle, log capture, cancellation tests
     dashboard.test.ts -- Dashboard REST API, SSE, and usage endpoint tests
-    usage-pricing.test.ts -- Per-model pricing lookup tests
+    pricing-repository.test.ts -- Pricing repository CRUD tests (in-memory)
+    usage-pricing.test.ts -- Per-model pricing lookup and DB override tests
     usage-repository.test.ts -- In-memory storage, filtering, summary aggregation tests
     usage-service.test.ts -- Usage recording, summarization, groupBy tests
   issues/             -- Generated: detailed analysis files

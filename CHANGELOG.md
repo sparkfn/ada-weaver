@@ -11,7 +11,7 @@
 
 ## v2.6.0 — 2026-02-16
 
-**Lean agent middleware & pricing CRUD.** Two major changes: (1) Switched all 4 agent entry points from `createDeepAgent` (deepagents library) to `createAgent` (langchain) with manually selected middleware — eliminating ~1,980 tokens/call of unused overhead from `todoListMiddleware`, `createFilesystemMiddleware` (duplicate tools), and `BASE_PROMPT`. Combined with lowered caps, estimated 30-45% reduction in input token usage. (2) Added a pricing management system with CRUD API, DB persistence, dashboard UI, and GPT-5.2 support.
+**Lean agent middleware & pricing CRUD.** Two major changes: (1) Switched all 4 agent entry points from `createDeepAgent` (deepagents library) to `createAgent` (langchain) with manually selected middleware — eliminating ~1,980 tokens/call of unused overhead from `todoListMiddleware`, `createFilesystemMiddleware` (duplicate tools), and `BASE_PROMPT`. Combined with lowered caps, estimated 30-45% reduction in input token usage. (2) Added a pricing management system with CRUD API, DB persistence, dashboard UI, and GPT-5.2 support. (3) Retroactive cost recalculation — old records with $0 cost now show correct costs based on current pricing.
 
 ### Added
 - **Pricing CRUD API** — 5 new endpoints in `src/dashboard.ts`:
@@ -24,8 +24,8 @@
 - **DB migration** `003_pricing.sql` — `pricing` table with `model_prefix`, `input_cost_per_million`, `output_cost_per_million`
 - **`setPricingLookup` / `buildPricingLookup`** in `src/usage-pricing.ts` — DB pricing overrides built-in table via longest-prefix matching; refreshed on every pricing mutation
 - **GPT-5.2 pricing** added to built-in table ($1.75/$14 per 1M tokens)
-- **Dashboard Pricing tab** — view defaults + DB overrides, add/edit/delete pricing records inline
-- **Cost display** in Usage tab — shows estimated cost per model based on pricing lookup
+- **Dashboard Pricing tab** — view defaults + DB overrides, add/edit/delete pricing records; built-in defaults rows are clickable to create overrides
+- **Retroactive cost recalculation** in `UsageService` — `query()`, `summarize()`, and `groupBy()` recalculate `estimatedCost` at query time using current pricing, so old records created before a model was added to the pricing table now show correct costs
 
 ### Changed
 - **`src/architect.ts`** — replaced `createDeepAgent` with `createAgent` + `createSubAgentMiddleware`, `summarizationMiddleware` (50K threshold), `anthropicPromptCachingMiddleware`, `createPatchToolCallsMiddleware`; subagent `defaultMiddleware` now excludes `todoListMiddleware` and `createFilesystemMiddleware`, adds `createContextCompactionMiddleware`
@@ -37,7 +37,8 @@
 - **PR diff cap** lowered from 50K → 15K chars (`src/github-tools.ts`)
 - **Subagents** in multi-agent mode now get context compaction middleware (previously only single-agent had it)
 - `calculateCost()` now checks DB pricing lookup before falling back to built-in table
-- `UsageService` tracks cost per record via pricing lookup
+- `UsageService` recalculates cost at query time (not just at record creation)
+- **Dashboard UI** — removed Actions columns from Processes and Pricing panels; processes show cancel button inline with status chip; built-in defaults rows are clickable to open override dialog
 
 ### Tests
 - Updated diff truncation assertion in `tests/reviewer-agent.test.ts` (50000 → 15000)

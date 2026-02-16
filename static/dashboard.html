@@ -42,7 +42,7 @@
       ThemeProvider, createTheme,
       CssBaseline, AppBar, Toolbar, Typography, Box, Tabs, Tab,
       Table, TableHead, TableBody, TableRow, TableCell, TableContainer,
-      Paper, Chip, IconButton, Drawer, Button, Fab,
+      Paper, Chip, IconButton, Button, Fab,
       Dialog, DialogTitle, DialogContent, DialogActions,
       TextField, FormControlLabel, Checkbox, Tooltip,
       CircularProgress, Alert, Stepper, Step, StepLabel,
@@ -203,12 +203,12 @@
         h(Box, { sx: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 } },
           h(Typography, { variant: fullPage ? 'h5' : 'h6', sx: { fontWeight: 600 } }, label),
           h(Box, { sx: { display: 'flex', gap: 1 } },
-            h(Tooltip, { title: fullPage ? 'Side panel view' : 'Full page view' },
+            h(Tooltip, { title: fullPage ? 'Modal view' : 'Full page view' },
               h(IconButton, {
                 size: 'small',
                 onClick: onToggleFullPage,
                 sx: { color: '#7c4dff' },
-              }, fullPage ? '\u25E8' : '\u2922')
+              }, fullPage ? '\u25A3' : '\u2922')
             ),
             onClose
               ? h(Tooltip, { title: 'Close' },
@@ -292,12 +292,18 @@
       );
     }
 
-    // ── ProcessDetailDrawer ────────────────────────────────────────────────────
+    // ── ProcessDetailModal ──────────────────────────────────────────────────────
 
-    function ProcessDetailDrawer({ process: proc, open, onClose, onCancel, logs, onToggleFullPage }) {
+    function ProcessDetailModal({ process: proc, open, onClose, onCancel, logs, onToggleFullPage }) {
       if (!proc) return null;
 
-      return h(Drawer, { anchor: 'right', open, onClose, PaperProps: { sx: { width: { xs: '100%', sm: 450 }, p: 3, background: '#16213e' } } },
+      return h(Dialog, {
+        open,
+        onClose,
+        maxWidth: 'md',
+        fullWidth: true,
+        PaperProps: { sx: { background: '#16213e', p: 2, maxHeight: '90vh' } },
+      },
         h(ProcessDetailContent, {
           process: proc,
           onCancel,
@@ -902,7 +908,7 @@
       const [status, setStatus] = useState(null);
       const [tab, setTab] = useState(0);
       const [selectedProc, setSelectedProc] = useState(null);
-      const [drawerOpen, setDrawerOpen] = useState(false);
+      const [modalOpen, setModalOpen] = useState(false);
       const [fullPageView, setFullPageView] = useState(false);
       const [dialogOpen, setDialogOpen] = useState(false);
       const [processLogs, setProcessLogs] = useState({});
@@ -982,7 +988,7 @@
       // When selecting a process, fetch its full data (including existing logs)
       function handleSelect(proc) {
         setSelectedProc(proc);
-        if (!fullPageView) setDrawerOpen(true);
+        if (!fullPageView) setModalOpen(true);
         else setFullPageView(true);
         fetch(`/api/processes/${proc.id}`)
           .then(r => r.json())
@@ -997,12 +1003,12 @@
 
       function handleToggleFullPage() {
         if (fullPageView) {
-          // Switch to drawer
+          // Switch to modal
           setFullPageView(false);
-          setDrawerOpen(true);
+          setModalOpen(true);
         } else {
           // Switch to full page
-          setDrawerOpen(false);
+          setModalOpen(false);
           setFullPageView(true);
         }
       }
@@ -1108,12 +1114,12 @@
             }, '+')
           : null,
 
-        // Detail drawer (only when not in full page mode)
+        // Detail modal (only when not in full page mode)
         !fullPageView
-          ? h(ProcessDetailDrawer, {
+          ? h(ProcessDetailModal, {
               process: selectedProc,
-              open: drawerOpen,
-              onClose: () => setDrawerOpen(false),
+              open: modalOpen,
+              onClose: () => setModalOpen(false),
               onCancel: handleCancel,
               logs: selectedLogs,
               onToggleFullPage: handleToggleFullPage,

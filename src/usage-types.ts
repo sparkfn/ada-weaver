@@ -1,5 +1,5 @@
 export type LLMProvider = 'anthropic' | 'openai' | 'openai-responses' | 'openai-compatible' | 'ollama';
-export type AgentRole = 'architect' | 'issuer' | 'coder' | 'reviewer' | 'chat';
+export type AgentRole = 'architect' | 'issuer' | 'coder' | 'reviewer' | 'chat' | (string & {});
 
 export interface LLMUsageRecord {
   id: string;                   // e.g. "usage-1707849600000-1"

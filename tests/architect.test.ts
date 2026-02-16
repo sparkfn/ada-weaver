@@ -13,6 +13,8 @@ import {
 import { UsageService } from '../src/usage-service.js';
 import { ToolCache } from '../src/tool-cache.js';
 
+const TEST_WORKSPACE = '/tmp/test-workspace';
+
 // ── buildArchitectSystemPrompt ──────────────────────────────────────────────
 
 describe('buildArchitectSystemPrompt', () => {
@@ -41,11 +43,12 @@ describe('buildArchitectSystemPrompt', () => {
     expect(prompt).toContain('Delegate to reviewer');
   });
 
-  it('mentions read-only verification tools', () => {
+  it('mentions local verification tools', () => {
     const prompt = buildArchitectSystemPrompt('o', 'r', 3);
     expect(prompt).toContain('fetch_github_issues');
-    expect(prompt).toContain('list_repo_files');
-    expect(prompt).toContain('read_repo_file');
+    expect(prompt).toContain('list_files');
+    expect(prompt).toContain('read_file');
+    expect(prompt).toContain('grep');
   });
 
   it('mentions check_ci_status in available tools', () => {
@@ -71,6 +74,11 @@ describe('buildArchitectSystemPrompt', () => {
     expect(prompt).toContain('Only ONE coder delegation per issue');
     expect(prompt).toContain('ALWAYS include the exact issue number');
   });
+
+  it('mentions local filesystem access', () => {
+    const prompt = buildArchitectSystemPrompt('o', 'r', 3);
+    expect(prompt).toContain('local filesystem access');
+  });
 });
 
 // ── createIssuerSubagent ────────────────────────────────────────────────────
@@ -79,52 +87,67 @@ describe('createIssuerSubagent', () => {
   const mockOctokit = {} as any;
 
   it('returns SubAgent with name "issuer"', () => {
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit);
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.name).toBe('issuer');
   });
 
-  it('has 6 tools (5 read + comment_on_issue)', () => {
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit);
-    expect(subagent.tools).toHaveLength(6);
+  it('has 7 tools (list, read, grep, issues, sub-issues, parent, comment)', () => {
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
+    expect(subagent.tools).toHaveLength(7);
   });
 
-  it('has 6 tools in dry-run mode', () => {
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { dryRun: true });
-    expect(subagent.tools).toHaveLength(6);
+  it('has 7 tools in dry-run mode', () => {
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { dryRun: true, workspacePath: TEST_WORKSPACE });
+    expect(subagent.tools).toHaveLength(7);
   });
 
   it('system prompt contains owner/repo', () => {
-    const subagent = createIssuerSubagent('test-owner', 'test-repo', mockOctokit);
+    const subagent = createIssuerSubagent('test-owner', 'test-repo', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.systemPrompt).toContain('test-owner/test-repo');
   });
 
   it('has a description', () => {
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit);
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.description).toBeTruthy();
     expect(subagent.description).toContain('issue');
   });
 
   it('does not include model when not provided', () => {
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit);
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.model).toBeUndefined();
   });
 
   it('includes model when provided', () => {
     const mockModel = { invoke: vi.fn() } as any;
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { model: mockModel });
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { model: mockModel, workspacePath: TEST_WORKSPACE });
     expect(subagent.model).toBe(mockModel);
   });
 
   it('system prompt mentions comment_on_issue', () => {
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit);
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.systemPrompt).toContain('comment_on_issue');
   });
 
   it('system prompt includes issue comment format template', () => {
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit);
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.systemPrompt).toContain('Issue Analysis');
     expect(subagent.systemPrompt).toContain('Recommended Approach');
     expect(subagent.systemPrompt).toContain('Automated analysis by Deep Agents');
+  });
+
+  it('system prompt mentions local tools: list_files, read_file, grep', () => {
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
+    expect(subagent.systemPrompt).toContain('list_files');
+    expect(subagent.systemPrompt).toContain('read_file');
+    expect(subagent.systemPrompt).toContain('grep');
+  });
+
+  it('includes tool names: list_files, read_file, grep', () => {
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
+    const toolNames = subagent.tools!.map((t: any) => t.name);
+    expect(toolNames).toContain('list_files');
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).toContain('grep');
   });
 });
 
@@ -134,51 +157,51 @@ describe('createCoderSubagent', () => {
   const mockOctokit = {} as any;
 
   it('returns SubAgent with name "coder"', () => {
-    const subagent = createCoderSubagent('o', 'r', mockOctokit, {});
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.name).toBe('coder');
   });
 
-  it('has 7 tools in normal mode', () => {
-    const subagent = createCoderSubagent('o', 'r', mockOctokit, {});
-    expect(subagent.tools).toHaveLength(7);
+  it('has 9 tools in normal mode', () => {
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
+    expect(subagent.tools).toHaveLength(9);
   });
 
-  it('has 7 tools in dry-run mode', () => {
-    const subagent = createCoderSubagent('o', 'r', mockOctokit, { dryRun: true });
-    expect(subagent.tools).toHaveLength(7);
+  it('has 9 tools in dry-run mode', () => {
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { dryRun: true, workspacePath: TEST_WORKSPACE });
+    expect(subagent.tools).toHaveLength(9);
   });
 
   it('system prompt contains owner/repo', () => {
-    const subagent = createCoderSubagent('test-owner', 'test-repo', mockOctokit, {});
+    const subagent = createCoderSubagent('test-owner', 'test-repo', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.systemPrompt).toContain('test-owner/test-repo');
   });
 
   it('does not include model when not provided', () => {
-    const subagent = createCoderSubagent('o', 'r', mockOctokit, {});
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.model).toBeUndefined();
   });
 
   it('includes model when provided', () => {
     const mockModel = { invoke: vi.fn() } as any;
-    const subagent = createCoderSubagent('o', 'r', mockOctokit, { model: mockModel });
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { model: mockModel, workspacePath: TEST_WORKSPACE });
     expect(subagent.model).toBe(mockModel);
   });
 
   it('has a description', () => {
-    const subagent = createCoderSubagent('o', 'r', mockOctokit, {});
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.description).toBeTruthy();
     expect(subagent.description).toContain('code');
   });
 
   it('system prompt includes TESTING GUIDELINES', () => {
-    const subagent = createCoderSubagent('o', 'r', mockOctokit, {});
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.systemPrompt).toContain('TESTING GUIDELINES');
     expect(subagent.systemPrompt).toContain('happy path');
   });
 
   it('uses dry-run tools when dryRun is true', () => {
-    const normalAgent = createCoderSubagent('o', 'r', mockOctokit, { dryRun: false });
-    const dryRunAgent = createCoderSubagent('o', 'r', mockOctokit, { dryRun: true });
+    const normalAgent = createCoderSubagent('o', 'r', mockOctokit, { dryRun: false, workspacePath: TEST_WORKSPACE });
+    const dryRunAgent = createCoderSubagent('o', 'r', mockOctokit, { dryRun: true, workspacePath: TEST_WORKSPACE });
 
     // Both should have the same number of tools
     expect(normalAgent.tools!.length).toBe(dryRunAgent.tools!.length);
@@ -188,6 +211,31 @@ describe('createCoderSubagent', () => {
     const dryRunNames = dryRunAgent.tools!.map((t: any) => t.name).sort();
     expect(normalNames).toEqual(dryRunNames);
   });
+
+  it('includes local tools: list_files, read_file, grep, edit_file, write_file, bash', () => {
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
+    const toolNames = subagent.tools!.map((t: any) => t.name);
+    expect(toolNames).toContain('list_files');
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).toContain('grep');
+    expect(toolNames).toContain('edit_file');
+    expect(toolNames).toContain('write_file');
+    expect(toolNames).toContain('bash');
+  });
+
+  it('includes GitHub API tools: create_pull_request, comment_on_issue, create_sub_issue', () => {
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
+    const toolNames = subagent.tools!.map((t: any) => t.name);
+    expect(toolNames).toContain('create_pull_request');
+    expect(toolNames).toContain('comment_on_issue');
+    expect(toolNames).toContain('create_sub_issue');
+  });
+
+  it('system prompt mentions git workflow via bash', () => {
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
+    expect(subagent.systemPrompt).toContain('git checkout -b');
+    expect(subagent.systemPrompt).toContain('git push origin HEAD');
+  });
 });
 
 // ── createReviewerSubagent ──────────────────────────────────────────────────
@@ -196,34 +244,49 @@ describe('createReviewerSubagent', () => {
   const mockOctokit = {} as any;
 
   it('returns SubAgent with name "reviewer"', () => {
-    const subagent = createReviewerSubagent('o', 'r', mockOctokit);
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, { workspacePath: TEST_WORKSPACE });
     expect(subagent.name).toBe('reviewer');
   });
 
-  it('has 4 tools', () => {
-    const subagent = createReviewerSubagent('o', 'r', mockOctokit);
-    expect(subagent.tools).toHaveLength(4);
+  it('has 5 tools (diff, list, read, grep, submit_pr_review)', () => {
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, { workspacePath: TEST_WORKSPACE });
+    expect(subagent.tools).toHaveLength(5);
   });
 
   it('system prompt contains owner/repo (from buildReviewerSystemPrompt)', () => {
-    const subagent = createReviewerSubagent('test-owner', 'test-repo', mockOctokit);
+    const subagent = createReviewerSubagent('test-owner', 'test-repo', mockOctokit, undefined, { workspacePath: TEST_WORKSPACE });
     expect(subagent.systemPrompt).toContain('test-owner/test-repo');
   });
 
   it('does not include model when not provided', () => {
-    const subagent = createReviewerSubagent('o', 'r', mockOctokit);
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, { workspacePath: TEST_WORKSPACE });
     expect(subagent.model).toBeUndefined();
   });
 
   it('includes model when provided', () => {
     const mockModel = { invoke: vi.fn() } as any;
-    const subagent = createReviewerSubagent('o', 'r', mockOctokit, mockModel);
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, mockModel, { workspacePath: TEST_WORKSPACE });
     expect(subagent.model).toBe(mockModel);
   });
 
   it('has a description mentioning reviews', () => {
-    const subagent = createReviewerSubagent('o', 'r', mockOctokit);
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, { workspacePath: TEST_WORKSPACE });
     expect(subagent.description).toContain('review');
+  });
+
+  it('includes local tools: list_files, read_file, grep', () => {
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, { workspacePath: TEST_WORKSPACE });
+    const toolNames = subagent.tools!.map((t: any) => t.name);
+    expect(toolNames).toContain('list_files');
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).toContain('grep');
+  });
+
+  it('accepts cache for diff delta computation', () => {
+    const cache = new ToolCache();
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, { workspacePath: TEST_WORKSPACE, cache });
+    expect(subagent.name).toBe('reviewer');
+    expect(subagent.tools).toHaveLength(5);
   });
 });
 
@@ -592,51 +655,33 @@ describe('formatUsageSummaryComment', () => {
   });
 });
 
-// ── Cache backward compatibility ─────────────────────────────────────────────
+// ── Workspace-based subagent factories ────────────────────────────────────────
 
-describe('subagent factories — backward compat (no cache)', () => {
+describe('subagent factories — workspace path flows through', () => {
   const mockOctokit = {} as any;
 
-  it('createIssuerSubagent works without cache', () => {
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit);
+  it('createIssuerSubagent requires workspacePath and has 7 tools', () => {
+    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.name).toBe('issuer');
-    expect(subagent.tools).toHaveLength(6);
-  });
-
-  it('createCoderSubagent works without cache', () => {
-    const subagent = createCoderSubagent('o', 'r', mockOctokit, {});
-    expect(subagent.name).toBe('coder');
     expect(subagent.tools).toHaveLength(7);
   });
 
-  it('createReviewerSubagent works without cache', () => {
-    const subagent = createReviewerSubagent('o', 'r', mockOctokit);
-    expect(subagent.name).toBe('reviewer');
-    expect(subagent.tools).toHaveLength(4);
-  });
-});
-
-describe('subagent factories — cache flows through', () => {
-  const mockOctokit = {} as any;
-
-  it('createIssuerSubagent accepts cache and still has 6 tools', () => {
-    const cache = new ToolCache();
-    const subagent = createIssuerSubagent('o', 'r', mockOctokit, { cache });
-    expect(subagent.name).toBe('issuer');
-    expect(subagent.tools).toHaveLength(6);
-  });
-
-  it('createCoderSubagent accepts cache and still has 7 tools', () => {
-    const cache = new ToolCache();
-    const subagent = createCoderSubagent('o', 'r', mockOctokit, { cache });
+  it('createCoderSubagent requires workspacePath and has 9 tools', () => {
+    const subagent = createCoderSubagent('o', 'r', mockOctokit, { workspacePath: TEST_WORKSPACE });
     expect(subagent.name).toBe('coder');
-    expect(subagent.tools).toHaveLength(7);
+    expect(subagent.tools).toHaveLength(9);
   });
 
-  it('createReviewerSubagent accepts cache and still has 4 tools', () => {
-    const cache = new ToolCache();
-    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, cache);
+  it('createReviewerSubagent uses opts.workspacePath and has 5 tools', () => {
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, { workspacePath: TEST_WORKSPACE });
     expect(subagent.name).toBe('reviewer');
-    expect(subagent.tools).toHaveLength(4);
+    expect(subagent.tools).toHaveLength(5);
+  });
+
+  it('createReviewerSubagent accepts cache for diff delta and still has 5 tools', () => {
+    const cache = new ToolCache();
+    const subagent = createReviewerSubagent('o', 'r', mockOctokit, undefined, { workspacePath: TEST_WORKSPACE, cache });
+    expect(subagent.name).toBe('reviewer');
+    expect(subagent.tools).toHaveLength(5);
   });
 });

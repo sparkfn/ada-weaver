@@ -7,15 +7,9 @@ import {
   getAuthFromConfig,
   createGitHubIssuesTool,
   createCommentOnIssueTool,
-  createBranchTool,
   createPullRequestTool,
-  createListRepoFilesTool,
-  createReadRepoFileTool,
   createDryRunCommentTool,
-  createDryRunBranchTool,
   createDryRunPullRequestTool,
-  createOrUpdateFileTool,
-  createDryRunCreateOrUpdateFileTool,
   createFetchSubIssuesTool,
   createGetParentIssueTool,
   createCreateSubIssueTool,
@@ -25,10 +19,23 @@ import {
   createCheckCiStatusTool,
   createDryRunCheckCiStatusTool,
 } from './github-tools.js';
+import {
+  createLocalReadFileTool,
+  createLocalListFilesTool,
+  createLocalGrepTool,
+  createLocalEditFileTool,
+  createLocalWriteFileTool,
+  createLocalBashTool,
+  createDryRunEditFileTool,
+  createDryRunWriteFileTool,
+  createDryRunBashTool,
+} from './local-tools.js';
+import { createWorkspace, resolveGitToken } from './workspace.js';
+import type { Workspace } from './workspace.js';
 import { formatDuration, logAgentEvent, logAgentDetail, logDiff } from './logger.js';
 import { createIterationPruningMiddleware } from './context-pruning.js';
 import { buildReviewerSystemPrompt } from './reviewer-agent.js';
-import { ToolCache, wrapWithCache, wrapWriteWithInvalidation, wrapDiffWithDelta, readFileKey, listFilesKey, prDiffKey } from './tool-cache.js';
+import { ToolCache, wrapDiffWithDelta, prDiffKey } from './tool-cache.js';
 import { findPrForIssue, findAllPrsForIssue } from './core.js';
 import type { Octokit } from 'octokit';
 import type { ProgressUpdate } from './process-manager.js';
@@ -236,22 +243,16 @@ export function createIssuerSubagent(
   owner: string,
   repo: string,
   octokit: Octokit,
-  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; cache?: ToolCache; contextTools?: ReturnType<typeof tool>[] } = {},
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; workspacePath: string; contextTools?: ReturnType<typeof tool>[] },
 ): SubAgent {
   const dryRun = opts.dryRun ?? false;
-
-  let listTool = createListRepoFilesTool(owner, repo, octokit);
-  let readTool = createReadRepoFileTool(owner, repo, octokit);
-
-  if (opts.cache) {
-    listTool = wrapWithCache(listTool, opts.cache, { extractKey: listFilesKey });
-    readTool = wrapWithCache(readTool, opts.cache, { extractKey: readFileKey });
-  }
+  const ws: Workspace = { path: opts.workspacePath, cleanup: async () => {} };
 
   const tools = [
     createGitHubIssuesTool(owner, repo, octokit),
-    listTool,
-    readTool,
+    createLocalListFilesTool(ws),
+    createLocalReadFileTool(ws),
+    createLocalGrepTool(ws),
     createFetchSubIssuesTool(owner, repo, octokit),
     createGetParentIssueTool(owner, repo, octokit),
     dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
@@ -262,11 +263,13 @@ export function createIssuerSubagent(
 
 Your job is to thoroughly understand a GitHub issue, produce a brief for the team, and post a formatted analysis comment on the issue itself.
 
+You have local filesystem access to the repository clone. Use the local tools to explore files.
+
 WORKFLOW:
 1. Read the issue title, body, and labels
 2. Check for sub-issues (fetch_sub_issues) and parent issue (get_parent_issue)
-3. Use list_repo_files to see the top-level repo structure (it defaults to depth 2). Then drill into the relevant directory with a path filter (e.g., path: "src/") — do NOT list the entire repo tree.
-4. Use read_repo_file to read 2-5 files relevant to the issue
+3. Use list_files to see the top-level repo structure. Then drill into the relevant directory with a path filter (e.g., path: "src/").
+4. Use read_file to read 2-5 files relevant to the issue. Use grep to search for specific patterns.
 5. Post your analysis as a comment on the issue using comment_on_issue (see format below)
 6. Return your brief as your final message (the Architect will read it)
 
@@ -312,9 +315,9 @@ CONSTRAINTS:
 - Your final message output is natural language, not JSON. Write clearly and specifically.
 - Post the comment BEFORE returning your brief. The comment enriches the issue for humans; the brief is for the Architect.
 
-IMPORTANT — TOOL USAGE:
-- ONLY use the GitHub API tools: fetch_github_issues, list_repo_files, read_repo_file, fetch_sub_issues, get_parent_issue, comment_on_issue.
-- You may see other tools (ls, write, edit, grep, glob, etc.) — these are sandbox filesystem tools. Do NOT use them. They have no access to the repository. All repo operations go through the GitHub API tools listed above.
+TOOL USAGE:
+- Use local tools for repo exploration: list_files, read_file, grep
+- Use GitHub API tools for issue operations: fetch_github_issues, fetch_sub_issues, get_parent_issue, comment_on_issue
 
 SHARED CONTEXT:
 - After your analysis, save your brief with \`save_issue_context\` (entry_type: "issuer_brief"). Include the files you identified in files_touched.
@@ -337,26 +340,19 @@ export function createCoderSubagent(
   owner: string,
   repo: string,
   octokit: Octokit,
-  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; cache?: ToolCache; contextTools?: ReturnType<typeof tool>[] },
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; workspacePath: string; contextTools?: ReturnType<typeof tool>[] },
 ): SubAgent {
   const dryRun = opts.dryRun ?? false;
-
-  let listTool = createListRepoFilesTool(owner, repo, octokit);
-  let readTool = createReadRepoFileTool(owner, repo, octokit);
-  let writeTool = dryRun ? createDryRunCreateOrUpdateFileTool() : createOrUpdateFileTool(owner, repo, octokit);
-
-  if (opts.cache) {
-    listTool = wrapWithCache(listTool, opts.cache, { extractKey: listFilesKey });
-    readTool = wrapWithCache(readTool, opts.cache, { extractKey: readFileKey });
-    writeTool = wrapWriteWithInvalidation(writeTool, opts.cache);
-  }
+  const ws: Workspace = { path: opts.workspacePath, cleanup: async () => {} };
 
   const tools = [
-    listTool,
-    readTool,
+    createLocalListFilesTool(ws),
+    createLocalReadFileTool(ws),
+    createLocalGrepTool(ws),
+    dryRun ? createDryRunEditFileTool() : createLocalEditFileTool(ws),
+    dryRun ? createDryRunWriteFileTool() : createLocalWriteFileTool(ws),
+    dryRun ? createDryRunBashTool() : createLocalBashTool(ws),
     dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
-    dryRun ? createDryRunBranchTool() : createBranchTool(owner, repo, octokit),
-    writeTool,
     dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit),
     dryRun ? createDryRunCreateSubIssueTool() : createCreateSubIssueTool(owner, repo, octokit),
     ...(opts.contextTools ?? []),
@@ -366,15 +362,7 @@ export function createCoderSubagent(
 
 Your job is to implement changes based on the Architect's instructions.
 
-CRITICAL — TOOL USAGE:
-You operate ENTIRELY through the GitHub API. You do NOT have local filesystem access.
-- To browse the repo: use list_repo_files and read_repo_file
-- To write code: use create_or_update_file (commits directly to GitHub)
-- To create branches: use create_branch
-- To open PRs: use create_pull_request
-- To comment on issues: use comment_on_issue
-- To create sub-issues: use create_sub_issue
-You may see other tools (ls, write, edit, grep, glob, etc.) — these are sandbox filesystem tools with NO access to the repository. NEVER use them. All repo operations MUST go through the GitHub API tools listed above.
+You have local filesystem access to a clone of the repository. Use local tools for reading, searching, and editing files. Use git via bash for branching, committing, and pushing. Use GitHub API tools for PRs, comments, and sub-issues.
 
 IMPORTANT: You MUST complete the PLANNING PHASE before writing any code.
 
@@ -383,8 +371,8 @@ PHASE 1: PLANNING (mandatory, do this FIRST)
 ═══════════════════════════════════════
 
 Before making ANY changes, you must:
-1. Use list_repo_files to see the top-level structure, then use path to drill into the relevant directory (e.g., path: "src/") — don't list the entire tree
-2. Use read_repo_file to read ALL files relevant to the task (files mentioned by the Architect + related files)
+1. Use list_files to see the top-level structure, then drill into the relevant directory (e.g., path: "src/")
+2. Use read_file and grep to read and search ALL files relevant to the task
 3. Identify existing patterns, conventions, imports, and dependencies
 4. Produce an EXECUTION PLAN as a numbered list:
    - Which files to create or modify, and in what order
@@ -408,14 +396,20 @@ PHASE 2: EXECUTION
 
 WORKFLOW FOR NEW ISSUES:
 1. Post a summary comment on the issue using comment_on_issue (include your execution plan)
-2. Create a branch named issue-<number>-<short-description> using create_branch
-   - Use the from_branch parameter if the Architect specifies a base branch (e.g. "develop", "feature/x")
-   - If no base branch is specified, it defaults to "main"
-3. Execute your plan: use create_or_update_file to commit changes in the order specified
-   - Write the FULL file content (not a diff) — the tool replaces the entire file
-   - Each call commits one file. Make multiple calls for multi-file changes.
-4. Self-review: use read_repo_file to read back each committed file and verify correctness against your plan
-5. Open a PR with title "Fix #<number>: <description>" using create_pull_request
+2. Create and switch to a branch via bash:
+   \`\`\`
+   bash: git checkout -b issue-<number>-<short-description>
+   \`\`\`
+   - If the Architect specifies a base branch, first: \`git checkout <base_branch> && git checkout -b issue-<number>-<short-description>\`
+3. Make changes using edit_file (for surgical edits to existing files) or write_file (for new files or full rewrites)
+   - Prefer edit_file over write_file for existing files — it's surgical and preserves surrounding code
+   - Use read_file first to see current content before editing
+4. Commit and push via bash:
+   \`\`\`
+   bash: git add -A && git commit -m "Fix #<number>: <description>" && git push origin HEAD
+   \`\`\`
+5. Self-review: use read_file to verify your changes
+6. Open a PR with title "Fix #<number>: <description>" using create_pull_request
    - If a base branch was specified, set the base parameter to match (e.g. base: "develop")
    - Body must contain "Closes #<number>" on its own line
    - Include your execution plan and a "## Self-Review" section noting what you checked
@@ -424,20 +418,23 @@ WORKFLOW FOR FIX ITERATIONS (when told to fix reviewer feedback):
 - The branch and PR ALREADY EXIST. Do NOT create new ones.
 - Do NOT post a new comment on the issue.
 - Still plan first: read the current files, understand the feedback, then list the specific fixes.
-- Apply fixes and commit to the same branch.
-- Use read_repo_file to verify your changes after committing.
+- Apply fixes with edit_file, then commit and push to the same branch:
+   \`\`\`
+   bash: git add -A && git commit -m "Address review feedback for #<number>" && git push origin HEAD
+   \`\`\`
+- Use read_file to verify your changes after committing.
 
 CONSTRAINTS:
-- Always create the branch BEFORE committing files, and commit files BEFORE the PR
+- Always create the branch BEFORE making changes, and push BEFORE opening the PR
 - Never merge PRs — only open them
-- Write tools are idempotent. If they return { skipped: true }, move to the next step
-- Base your changes on actual file content from read_repo_file, not assumptions
+- Use edit_file for targeted changes; write_file only for new files or complete rewrites
+- Base your changes on actual file content from read_file, not assumptions
 - If adding new dependencies, explain why in the PR body
 
 CODE QUALITY GUIDELINES:
 - Prefer existing patterns and dependencies in the codebase
 - Use clear commit messages like "Fix #<number>: improve README structure"
-- You MUST commit at least one file so the PR has a real diff
+- You MUST commit and push at least one change so the PR has a real diff
 
 SUB-ISSUE SUPPORT:
 - If instructed about sub-issues, use create_sub_issue to break down parent issues
@@ -457,7 +454,7 @@ SHARED CONTEXT:
 
   return {
     name: 'coder',
-    description: 'Implements code changes — creates branches, commits files, opens PRs. Can also fix reviewer feedback on existing branches.',
+    description: 'Implements code changes — creates branches, edits files, commits, pushes, and opens PRs. Can also fix reviewer feedback on existing branches.',
     systemPrompt,
     tools,
     ...(opts.model ? { model: opts.model } : {}),
@@ -473,30 +470,30 @@ export function createReviewerSubagent(
   repo: string,
   octokit: Octokit,
   model?: ReturnType<typeof createModel>,
-  cache?: ToolCache,
-  contextTools?: ReturnType<typeof tool>[],
+  opts?: { workspacePath: string; cache?: ToolCache; contextTools?: ReturnType<typeof tool>[] },
 ): SubAgent {
-  let diffTool = createGetPrDiffTool(octokit, owner, repo);
-  let listTool = createListRepoFilesTool(owner, repo, octokit);
-  let readTool = createReadRepoFileTool(owner, repo, octokit);
+  const ws: Workspace = { path: opts?.workspacePath ?? '', cleanup: async () => {} };
 
-  if (cache) {
-    diffTool = wrapDiffWithDelta(diffTool, cache, { extractKey: prDiffKey });
-    listTool = wrapWithCache(listTool, cache, { extractKey: listFilesKey });
-    readTool = wrapWithCache(readTool, cache, { extractKey: readFileKey });
+  let diffTool = createGetPrDiffTool(octokit, owner, repo);
+  if (opts?.cache) {
+    diffTool = wrapDiffWithDelta(diffTool, opts.cache, { extractKey: prDiffKey });
   }
 
   const tools = [
     diffTool,
-    listTool,
-    readTool,
+    createLocalListFilesTool(ws),
+    createLocalReadFileTool(ws),
+    createLocalGrepTool(ws),
     createSubmitPrReviewTool(octokit, owner, repo),
-    ...(contextTools ?? []),
+    ...(opts?.contextTools ?? []),
   ];
 
   let systemPrompt = buildReviewerSystemPrompt(owner, repo);
 
-  systemPrompt += `\n\nSHARED CONTEXT:
+  systemPrompt += `\n\nLOCAL TOOLS:
+You have local filesystem access to the repository clone. Use read_file and grep to read source files for context during review, in addition to the PR diff.
+
+SHARED CONTEXT:
 - Read the coder's plan with \`get_issue_context\` before reviewing — understand what was intended before judging the diff.
 - Save your feedback with \`save_issue_context\` (entry_type: "review_feedback"). Include the files you reviewed in files_touched.`;
 
@@ -522,7 +519,7 @@ You coordinate a team of specialist agents to process GitHub issues end-to-end. 
 
 YOUR TEAM:
 - **issuer**: Understands issues. Give it an issue number and it produces a brief (summary, type, complexity, relevant files, recommended approach, whether to proceed).
-- **coder**: Implements changes via the GitHub API. Give it specific instructions based on the Issuer's brief. It creates branches, commits code via create_or_update_file, and opens PRs. It does NOT have local filesystem access — all operations go through GitHub API tools.
+- **coder**: Implements changes using local filesystem tools and git. Give it specific instructions based on the Issuer's brief. It edits files locally, commits and pushes via git, and opens PRs via the GitHub API.
 - **reviewer**: Reviews PRs. Give it a PR number and it reviews the diff, posts feedback, and returns a verdict (resolved or needs_changes with specific feedback items).
 
 STANDARD WORKFLOW:
@@ -567,12 +564,13 @@ CRITICAL RULES:
 - When delegating to coder for fixes, always specify the existing branch name and PR number.
 - Only ONE coder delegation per issue unless there are explicit sub-issues. Never split a single issue into multiple PRs.
 - Your final message should be a clear summary of what was done and the outcome.
-- NEVER tell subagents they have "filesystem access" or "local file access". All subagents operate through GitHub API tools only. Do not mention filesystem, sandbox, ls, write, edit, grep, or glob tools in your instructions.
+- All subagents have local filesystem access to the repo clone. They use local tools (list_files, read_file, grep, edit_file, write_file, bash) plus GitHub API tools (create_pull_request, comment_on_issue, etc.).
 
 AVAILABLE TOOLS FOR VERIFICATION (read-only):
 - fetch_github_issues: Check issue details
-- list_repo_files: Browse repo structure
-- read_repo_file: Read file contents
+- list_files: Browse repo structure (local filesystem)
+- read_file: Read file contents (local filesystem)
+- grep: Search for patterns across the codebase (local filesystem)
 - check_ci_status: Check CI/check-run results for a PR (returns success, failure, in_progress, or no_checks)
 
 SHARED CONTEXT:
@@ -583,7 +581,7 @@ SHARED CONTEXT:
 
 // ── Architect factory ────────────────────────────────────────────────────────
 
-export function createArchitect(
+export async function createArchitect(
   config: Config,
   options: {
     dryRun?: boolean;
@@ -592,12 +590,22 @@ export function createArchitect(
     processId?: string | null;
     contextRepo?: IssueContextRepository;
     repoId?: number;
+    continueContext?: ContinueContext;
   } = {},
 ) {
   const { owner, repo } = config.github;
-  const octokit = createGitHubClient(getAuthFromConfig(config.github));
+  const auth = getAuthFromConfig(config.github);
+  const octokit = createGitHubClient(auth);
 
   const maxIterations = options.maxIterations ?? 3;
+
+  // Resolve git token and create workspace
+  const gitToken = await resolveGitToken(auth);
+  const workspace = await createWorkspace(owner, repo, gitToken, {
+    branch: options.continueContext?.branchName,
+    processId: options.processId ?? undefined,
+  });
+  console.log(`\u{1F4C2} Workspace cloned to ${workspace.path}`);
 
   // Models for each subagent (fall back to main LLM)
   const issuerModel = config.issuerLlm
@@ -612,7 +620,7 @@ export function createArchitect(
     ? createModel({ ...config, llm: config.reviewerLlm })
     : undefined;
 
-  // Shared file cache across all subagents
+  // Shared cache (only used for reviewer PR diff delta computation)
   const cache = new ToolCache();
 
   // Build per-agent context tools (if contextRepo is provided)
@@ -647,23 +655,20 @@ export function createArchitect(
     ];
   }
 
-  // Build subagents
+  // Build subagents with workspace path
   const subagents = [
-    createIssuerSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: issuerModel, cache, contextTools: issuerContextTools }),
-    createCoderSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: coderModel, cache, contextTools: coderContextTools }),
-    createReviewerSubagent(owner, repo, octokit, reviewerModel, cache, reviewerContextTools),
+    createIssuerSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: issuerModel, workspacePath: workspace.path, contextTools: issuerContextTools }),
+    createCoderSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: coderModel, workspacePath: workspace.path, contextTools: coderContextTools }),
+    createReviewerSubagent(owner, repo, octokit, reviewerModel, { workspacePath: workspace.path, cache, contextTools: reviewerContextTools }),
   ];
 
-  // Architect's own read-only tools for verification (also cached)
-  let architectListTool = createListRepoFilesTool(owner, repo, octokit);
-  let architectReadTool = createReadRepoFileTool(owner, repo, octokit);
-  architectListTool = wrapWithCache(architectListTool, cache, { extractKey: listFilesKey });
-  architectReadTool = wrapWithCache(architectReadTool, cache, { extractKey: readFileKey });
-
+  // Architect's own local tools for verification
+  const architectWs: Workspace = { path: workspace.path, cleanup: async () => {} };
   const architectTools = [
     createGitHubIssuesTool(owner, repo, octokit),
-    architectListTool,
-    architectReadTool,
+    createLocalListFilesTool(architectWs),
+    createLocalReadFileTool(architectWs),
+    createLocalGrepTool(architectWs),
     options.dryRun ? createDryRunCheckCiStatusTool() : createCheckCiStatusTool(owner, repo, octokit),
     ...architectContextTools,
   ];
@@ -679,7 +684,7 @@ export function createArchitect(
     middleware: [createIterationPruningMiddleware()],
   });
 
-  return { agent, cache };
+  return { agent, cache, workspace };
 }
 
 // ── LLM config resolver ──────────────────────────────────────────────────────
@@ -805,18 +810,25 @@ export async function runArchitect(
   } else {
     console.log(`\u{1F3D7}\uFE0F  Architect processing issue #${issueNumber} (max ${maxIterations} review iterations)`);
   }
+  // Single-agent mode: delegate to single-agent runner
+  if (config.agentMode === 'single') {
+    const { runSingleAgent } = await import('./single-agent.js');
+    return runSingleAgent(config, issueNumber, options);
+  }
+
   if (options.dryRun) {
     console.log('\u{1F9EA} DRY RUN MODE -- Coder subagent will skip GitHub writes');
   }
   console.log('');
 
-  const { agent: architect, cache } = createArchitect(config, {
+  const { agent: architect, cache, workspace } = await createArchitect(config, {
     dryRun: options.dryRun,
     maxIterations,
     issueNumber,
     processId: options.processId,
     contextRepo: options.contextRepo,
     repoId: options.repoId,
+    continueContext: options.continueContext,
   });
 
   // Octokit client for diff fetching after coder completes
@@ -856,6 +868,7 @@ Skip the issuer step — go directly to the reviewer:
     { version: 'v2' },
   );
 
+  try {
   for await (const ev of stream) {
     if (options.signal?.aborted) break;
 
@@ -1032,6 +1045,11 @@ Skip the issuer step — go directly to the reviewer:
         } catch { /* best-effort */ }
       }
     }
+  }
+  } finally {
+    // Always clean up workspace
+    console.log(`\u{1F9F9} Cleaning up workspace at ${workspace.path}`);
+    await workspace.cleanup();
   }
 
   console.log('='.repeat(60));

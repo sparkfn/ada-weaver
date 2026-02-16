@@ -65,6 +65,7 @@ export function loadConfig() {
     maxIssuesPerRun: parseIntEnv('MAX_ISSUES_PER_RUN'),
     maxToolCallsPerRun: parseIntEnv('MAX_TOOL_CALLS_PER_RUN'),
     maxIterations: parseIntEnv('MAX_ITERATIONS') ?? parseIntEnv('MAX_FEEDBACK_ITERATIONS'),
+    agentMode: (process.env.AGENT_MODE || 'multi') as 'single' | 'multi',
   };
 
   // issuerLlm (all-or-nothing: only if PROVIDER is set)

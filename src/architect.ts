@@ -371,10 +371,11 @@ PHASE 1: PLANNING (mandatory, do this FIRST)
 ═══════════════════════════════════════
 
 Before making ANY changes, you must:
-1. Use list_files to see the top-level structure, then drill into the relevant directory (e.g., path: "src/")
-2. Use read_file and grep to read and search ALL files relevant to the task
-3. Identify existing patterns, conventions, imports, and dependencies
-4. Produce an EXECUTION PLAN as a numbered list:
+1. Call \`get_issue_context\` to read the Issuer's brief — it lists relevant files already analyzed. Do NOT re-explore files the Issuer already identified.
+2. Use list_files ONLY if you need to find files not covered by the Issuer's brief.
+3. Use grep to find specific code patterns. For files >100 lines, grep first to find relevant line numbers, then use read_file with start_line/end_line to read only those sections.
+4. Identify existing patterns, conventions, imports, and dependencies
+5. Produce an EXECUTION PLAN as a numbered list:
    - Which files to create or modify, and in what order
    - For each file: what specific changes to make and why
    - What existing patterns to follow (naming, structure, imports)
@@ -417,8 +418,9 @@ WORKFLOW FOR NEW ISSUES:
 WORKFLOW FOR FIX ITERATIONS (when told to fix reviewer feedback):
 - The branch and PR ALREADY EXIST. Do NOT create new ones.
 - Do NOT post a new comment on the issue.
-- Still plan first: read the current files, understand the feedback, then list the specific fixes.
-- Apply fixes with edit_file, then commit and push to the same branch:
+- Do NOT re-run list_files or re-explore the codebase. You already know the repo structure.
+- Read ONLY the specific lines mentioned in the reviewer's feedback using grep and read_file with start_line/end_line.
+- List the specific fixes, then apply them with edit_file and commit+push:
    \`\`\`
    bash: git add -A && git commit -m "Address review feedback for #<number>" && git push origin HEAD
    \`\`\`
@@ -492,6 +494,11 @@ export function createReviewerSubagent(
 
   systemPrompt += `\n\nLOCAL TOOLS:
 You have local filesystem access to the repository clone. Use read_file and grep to read source files for context during review, in addition to the PR diff.
+
+TOKEN-EFFICIENT READING:
+- Read ONLY files that appear in the PR diff — do not explore unrelated files.
+- Use start_line/end_line to read just the surrounding context of changed lines (±30 lines), not entire files.
+- For files >100 lines, use grep first to find the relevant sections, then read only those ranges.
 
 SHARED CONTEXT:
 - Read the coder's plan with \`get_issue_context\` before reviewing — understand what was intended before judging the diff.

@@ -6,3 +6,4 @@ poll.lock/
 CLAUDE.md
 *.pem
 .env
+.workspaces/

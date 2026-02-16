@@ -9,6 +9,20 @@
 
 ---
 
+## v2.3.0 — 2026-02-16
+
+**Token-Efficient Agent Prompts & Reduced Read Default.** Five changes to reduce file-reading token waste by ~40% across multi-iteration runs. Agents now reuse prior context instead of re-exploring, use targeted partial reads instead of full files, and skip re-exploration on fix iterations.
+
+### Changed
+- **Coder planning phase** (`architect.ts`) — now requires `get_issue_context` first to reuse the Issuer's brief instead of re-exploring files; `list_files` used only for files not already covered
+- **Coder fix iterations** (`architect.ts`) — now explicitly skips re-exploration; reads only lines mentioned in reviewer feedback via grep + `start_line`/`end_line`
+- **Reviewer local tools section** (`architect.ts`) — added TOKEN-EFFICIENT READING guidance: read only diff files, use `start_line`/`end_line` for ±30 lines around changes, grep first for large files
+- **Reviewer base workflow** (`reviewer-agent.ts`) — updated step 2 to target only files touched in the diff with partial reads instead of full file reads
+- **`read_file` tool** (`local-tools.ts`) — default truncation reduced from 500 → 200 lines; description now encourages grep-first workflow for files >100 lines
+- **673 tests** — all passing (no test changes needed)
+
+---
+
 ## v2.2.0 — 2026-02-16
 
 **Single-Agent Mode & Context Compaction.** Adds an alternative execution mode where one agent handles the entire issue lifecycle (analysis, planning, implementation, self-review, fix iterations) in a single context window, retaining full working memory across phases. When context grows too large, a compaction middleware automatically truncates old messages. Usage tracking records the LLM model name as the agent identifier instead of a generic role.

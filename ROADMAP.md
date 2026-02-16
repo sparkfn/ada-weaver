@@ -175,6 +175,9 @@ Incremental improvements after the v1.0.0 milestone. These are not new phases �
 | v1.6.0 | LLM usage metrics, `/prompt` human-in-the-loop feedback, unified `serve` command, `test-access` CLI | ✓ v1.6.0 |
 | v1.7.0 | PostgreSQL persistence & multi-repo schema — poll state, usage, processes survive restarts | ✓ v1.7.0 |
 | v1.8.0 | Shared file cache — in-memory cache across subagents to reduce redundant GitHub API reads | ✓ v1.8.0 |
+| v1.9.0 | Conversation pruning — compress old iteration messages to reduce context bloat during multi-cycle runs | ✓ v1.9.0 |
+| v1.10.0 | Unified process tracking — all runs (poll, webhook, dashboard) create AgentProcess records; History tab removed | ✓ v1.10.0 |
+| v2.0.0 | Issue context system — shared agent memory, cross-run learning, restricted parallel delegation | ✓ v2.0.0 |
 
 ---
 

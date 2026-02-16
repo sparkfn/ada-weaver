@@ -31,7 +31,9 @@ When an issue is opened, the **Architect** supervisor coordinates three speciali
 2. **Coder** — comments on issue, creates branch, commits files, opens draft PR
 3. **Reviewer** — fetches PR diff, reads source for context, posts review (COMMENT only)
 
-The Architect makes all orchestration decisions via LLM reasoning — non-deterministic workflow. It can skip steps, reorder, iterate (reviewer finds issues → coder fixes → re-review), or run subagents in parallel when tasks are independent (e.g., multiple coders on separate branches).
+All agents share a persistent **issue context** (like a Jira ticket) — each agent reads from and writes to it, so the Coder sees the Issuer's raw brief, the Reviewer sees the Coder's plan, and past issues can be searched for cross-run learning.
+
+The Architect makes all orchestration decisions via LLM reasoning — non-deterministic workflow. It can skip steps, reorder, or iterate (reviewer finds issues → coder fixes → re-review).
 
 The agent never merges PRs. It only proposes fixes as drafts. The reviewer agent posts a COMMENT review -- it never approves or requests changes.
 
@@ -533,7 +535,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-511 tests across 15 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+561 tests across 17 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 
@@ -564,6 +566,7 @@ learning-deep-agents/
     cli.ts            -- CLI entry point (subcommands: poll, analyze, review, webhook, dialog, serve, migrate, test-access, status)
     core.ts           -- Shared logic (poll cycle, state management, graceful shutdown)
     architect.ts      -- Architect supervisor agent with Issuer, Coder, Reviewer subagents
+    context-pruning.ts -- Iteration pruning middleware (compresses old review-fix cycle messages)
     index.ts          -- Original entry point (thin wrapper, backwards-compatible)
     config.ts         -- Loads config from .env (GitHub + LLM + webhook + database)
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
@@ -595,6 +598,7 @@ learning-deep-agents/
         001_initial_schema.sql -- Full schema: repos, poll_state, issue_actions, agent_processes, llm_usage
   tests/
     architect.test.ts -- Architect supervisor, subagent factories, extractTaskInput, system prompt tests
+    context-pruning.test.ts -- Iteration pruning middleware tests (boundary detection, compression, edge cases)
     tool-cache.test.ts -- ToolCache, wrapWithCache, wrapWriteWithInvalidation, cache+circuit breaker integration
     core.test.ts      -- Unit tests for core logic, state, graceful shutdown
     github-tools.test.ts -- Idempotency and tool tests (mocked Octokit)

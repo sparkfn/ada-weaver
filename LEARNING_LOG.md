@@ -6064,3 +6064,212 @@ First successful dry run showed: **7 cache hits, 50 misses (12.3% hit rate)** on
 - **Entry 29** (Structured Logging): The `wrapWithLogging` middleware follows the same `invoke`-wrapping pattern. Cache must be applied at a different layer (`func`) to avoid lifecycle conflicts.
 - **Entry 49** (Parallel Subagents): Cache is shared across parallel coder/reviewer runs, maximizing reuse.
 - **Entry 50** (Usage Metrics): Cache stats (hits, misses, invalidations) are logged alongside usage metrics for observability.
+
+---
+
+## Entry 55: Conversation Pruning — Compressing Old Iterations to Reduce Context Bloat (v1.9.0)
+
+**Date:** 2026-02-16
+**Author:** Architect Agent
+
+### The problem
+
+The Architect agent runs in a single `streamEvents()` call. Every subagent delegation (task tool call + response) and every verification tool call appends messages to an append-only history. After 2-3 review-fix cycles, the context snowballs with stale tool responses from earlier iterations. A typical reviewer response is 2-3k chars, a coder response 3-5k chars, and the Architect's own instructions to each subagent add another 500-1000 chars. By the third iteration, 10-15k chars of stale content is competing with the latest, relevant context.
+
+The built-in `summarizationMiddleware` only triggers at ~170k tokens — far too high for practical pruning during a 3-iteration run. There was no custom context management in the codebase.
+
+### The solution: wrapModelCall middleware
+
+A custom middleware using `createMiddleware` from `langchain` with a `wrapModelCall` hook. This follows the same pattern as `contextEditingMiddleware` / `ClearToolUsesEdit` in the framework — mutate `request.messages` in-place before each model call.
+
+```typescript
+// src/context-pruning.ts
+export function createIterationPruningMiddleware(opts?) {
+  return createMiddleware({
+    name: 'IterationPruningMiddleware',
+    wrapModelCall: async (request, handler) => {
+      const boundaries = findIterationBoundaries(request.messages);
+      if (boundaries.length >= 2) {
+        const latestBoundary = boundaries[boundaries.length - 1];
+        compressOldIterations(request.messages, latestBoundary, maxCompressedLength);
+      }
+      return handler(request);
+    },
+  });
+}
+```
+
+### Key design decisions
+
+**1. Detection via reviewer boundaries, not iteration counters**
+
+Rather than tracking a counter externally, the middleware scans the message array for completed review-fix cycles. A cycle is "complete" when an AIMessage delegates to the reviewer subagent (task tool call with `subagent_type: 'reviewer'`) and has a matching ToolMessage response. This is stateless — works correctly even if the middleware runs multiple times on the same messages.
+
+**2. Compression, not removal**
+
+Removing messages entirely would break LangGraph's message graph (tool responses must match tool calls). Instead, messages are compressed in-place:
+
+| Message type | Compression |
+|---|---|
+| Task ToolMessages (subagent responses) | First 500 chars + `[... compressed from previous iteration — original was N chars]` |
+| AIMessages with task calls | `args.prompt` field truncated to 200 chars |
+| Non-task ToolMessages (check_ci_status, etc.) | Replaced with `[Previous iteration tool result cleared]` |
+| First HumanMessage | Always preserved |
+| Latest iteration onward | Untouched |
+
+**3. wrapModelCall over beforeModel**
+
+`beforeModel` hooks return state updates but can't modify the messages array directly — you'd need `RemoveMessage` from `@langchain/core/messages`, which is only available as a transitive nested dependency (not directly importable). `wrapModelCall` receives the full `ModelRequest` with `messages: BaseMessage[]` and can mutate it in-place, then pass to `handler`.
+
+**4. No LLM call for compression**
+
+Pure string truncation with zero latency and zero cost. The first ~500 chars of a subagent response typically contain the verdict, PR/branch references, and key findings — enough for the Architect to remember what happened without carrying the full verbose output.
+
+### Why >= 2 iterations as the threshold
+
+With only 1 completed iteration, there's nothing "old" to compress — all messages are from the current or only cycle. Compression only makes sense when there are at least 2 completed iterations, so the oldest can be compressed while the latest stays intact.
+
+### Integration
+
+Wired into `createArchitect()` with a single line:
+
+```typescript
+const agent = createDeepAgent({
+  model,
+  tools: architectTools,
+  subagents,
+  systemPrompt,
+  middleware: [createIterationPruningMiddleware()],
+});
+```
+
+The `middleware` parameter on `createDeepAgent` accepts an array of `AgentMiddleware` instances — custom middleware runs after the built-in middleware stack (todo, filesystem, summarization, etc.).
+
+### Connections to previous entries
+
+- **Entry 46** (Architect Supervisor): The Architect's review-fix cycle is what generates the context bloat this middleware addresses. Each iteration adds issuer/coder/reviewer responses.
+- **Entry 49** (Parallel Subagents): Parallel coder runs within an iteration create even more messages. The boundary detection correctly handles this by keying on reviewer responses, not coder responses.
+- **Entry 54** (Shared File Cache): Cache and pruning are complementary optimizations — cache reduces API calls (cost/latency), while pruning reduces context size (token usage/quality). Both target the same problem of redundancy in multi-iteration runs.
+
+---
+
+## Entry 56: Unified Process Tracking — Making All Runs Visible (v1.10.0)
+
+**Date:** 2026-02-16
+**Author:** Architect Agent
+
+### The problem
+
+There were three independent code paths that call `runArchitect()`, each with its own tracking:
+
+| Path | Entry point | Tracking |
+|------|------------|----------|
+| Dashboard UI | `ProcessManager.startAnalysis()` | AgentProcess in DB + SSE events |
+| Poll cycle | `runPollCycle()` in `core.ts` | PollState in `last_poll.json` (IssueActions) |
+| Webhook | `handleIssuesEvent()` in `listener.ts` | Nothing persisted |
+
+This meant the Processes tab only showed dashboard-triggered runs. Poll and webhook runs were invisible — they executed fine but left no trace in the dashboard. The History tab existed as a separate view reading raw `last_poll.json` data, but it showed a completely different data model (IssueActions: branch/PR/comment booleans) than the Processes tab (AgentProcess: status/phase/logs/outcome).
+
+### The solution: save AgentProcess from all paths
+
+Three changes unify tracking:
+
+**1. Poll cycle (`core.ts`)**: After `runArchitect()` completes, save an `AgentProcess` record via the optional `processRepository` parameter. Both success and failure cases are handled. The existing `IssueActions` / PollState tracking is kept — it serves the poll dedup purpose (preventing re-processing of already-seen issues).
+
+**2. Unified webhook (`dashboard.ts`)**: In the unified server mode (`deepagents serve`), `issues.opened` webhook events are routed through `processManager.startAnalysis()` instead of `handleWebhookEvent()`. This gives full process lifecycle tracking + SSE live updates for free — the ProcessManager already handles all of that.
+
+**3. Standalone webhook (`listener.ts`)**: For the standalone `deepagents webhook` mode, `handleIssuesEvent()` accepts an optional `processRepository` and saves `AgentProcess` records directly (same pattern as poll cycle).
+
+### Why remove History instead of keeping both tabs
+
+The History tab read from `last_poll.json` via `loadPollState()` — a file-based format designed for poll dedup, not for process visibility. It showed `IssueActions` (which branches/PRs/comments were created) rather than `AgentProcess` (which has status, phases, logs, timing, outcomes). With all three code paths now creating AgentProcess records, the Processes tab shows everything the History tab showed plus much more. Keeping both would mean maintaining two data models for the same information.
+
+### Design pattern: optional repository injection
+
+All three code paths accept `processRepository` as an optional parameter. When `undefined`, the path works exactly as before — zero behavior change. This is the same pattern used for `pollRepository` and `issueContextRepository` throughout the codebase. The CLI's `createRepositories()` factory provides all repositories (PG-backed or in-memory), so wiring is trivial.
+
+### Connections to previous entries
+
+- **Entry 48** (Web Dashboard): Created the ProcessManager and the original Processes/History/Usage tab layout. The History tab used `loadPollState()` as a quick solution to show prior runs. This entry replaces it with unified tracking.
+- **Entry 53** (PostgreSQL Persistence): The ProcessRepository interface and PG implementation were already in place — this entry just wires them into two more code paths.
+- **Entry 40** (Webhook issues.opened): The original fire-and-forget pattern where webhook runs left no trace. Now they create AgentProcess records.
+
+---
+
+## Entry 57: Issue Context System — Shared Memory for Agents (v2.0.0)
+
+**Date:** 2026-02-16
+**Author:** Architect Agent
+
+### The problem
+
+Sub-agents (Issuer, Coder, Reviewer) communicate only through the Architect, which paraphrases each agent's output before passing it to the next. This "telephone game" causes context loss — the Coder never sees the Issuer's raw analysis, the Reviewer doesn't know what the Coder intended, and on fix iterations, nobody has the exact previous feedback. Additionally, every run starts from scratch — there's no way to learn from how past issues were solved.
+
+A secondary problem: the Architect's "PARALLEL EXECUTION" prompt encouraged it to spawn multiple coders even for single issues, creating duplicate PRs with wrong issue numbers and doubling token costs.
+
+### The solution: shared issue_context table
+
+A new `issue_context` table acts like a Jira ticket — all agents read from and write to it. Three LangChain tools provide the interface:
+
+| Tool | Who uses it | Purpose |
+|------|------------|---------|
+| `save_issue_context` | All agents | Record analysis, plan, feedback, or outcome with file paths |
+| `get_issue_context` | All agents | Read shared context from the current pipeline run |
+| `search_past_issues` | Issuer, Architect | Cross-run: find past issues that touched the same files |
+
+The agent name is baked into `save_issue_context` at creation time — the tool knows who's calling it without the LLM needing to specify.
+
+### Auto-capture backstop
+
+Agents might forget to call `save_issue_context`. As a reliability backstop, the event stream handler in `runArchitect()` auto-captures subagent outputs when `on_tool_end` fires for completed task calls:
+
+```typescript
+const entryTypeMap = { issuer: 'issuer_brief', coder: 'coder_plan', reviewer: 'review_feedback' };
+```
+
+These auto-captured entries use `agent: "issuer:auto"` (etc.) to distinguish them from agent-initiated saves. An `outcome` entry is also auto-saved after the Architect completes.
+
+### Cross-run learning via GIN index
+
+The `files_touched` column is a PostgreSQL `TEXT[]` with a GIN index. The `searchByFiles` method uses the `&&` (array overlap) operator:
+
+```sql
+SELECT * FROM issue_context WHERE repo_id = $1 AND files_touched && $2
+```
+
+This lets the Issuer/Architect ask "what happened last time someone changed `src/auth.ts`?" before planning. The in-memory implementation simulates this with `Array.some()`.
+
+### Restricting parallel delegation
+
+The Architect's system prompt now says:
+
+> Do NOT use parallel delegation unless the issue has explicit sub-issues returned by fetch_sub_issues. For a single issue, ALWAYS use the standard sequential workflow.
+
+And:
+
+> Only ONE coder delegation per issue unless there are explicit sub-issues. Never split a single issue into multiple PRs.
+
+This was triggered by a real production issue: the Architect spawned two coders for issue #27, one produced a correct PR (#32) and one hallucinated issue #123 and created a wrong PR (#31).
+
+### Architecture: optional repository injection
+
+The same pattern used for `pollRepository`, `usageRepository`, and `processRepository`:
+
+```
+cli.ts → createRepositories() → repos.issueContextRepository
+  → dashboard.ts (DashboardOptions)
+    → ProcessManager constructor
+      → runArchitect() options
+  → core.ts (runPollCycle options)
+    → runArchitect() options
+  → architect.ts (createArchitect options)
+    → per-agent context tools
+```
+
+When `contextRepo` is `undefined` (e.g., older code paths), everything works as before — zero behavior change.
+
+### Connections to previous entries
+
+- **Entry 54** (Shared File Cache): Cache reduces API calls within a run; context reduces information loss between agents within a run and across runs. Complementary optimizations.
+- **Entry 55** (Conversation Pruning): Pruning reduces stale context in the LLM's message history; the context system provides an external memory that persists independently of the message stream.
+- **Entry 49** (Parallel Subagents): The parallel execution feature is now restricted to sub-issue scenarios only, fixing a real production issue with duplicate PRs.

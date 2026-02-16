@@ -9,6 +9,68 @@
 
 ---
 
+## v2.0.0 — 2026-02-16
+
+**Issue Context System — Shared Memory for Agents.** Adds a shared `issue_context` table that acts like a Jira ticket: all agents read from and write to it, eliminating the "telephone game" where the Architect paraphrases each agent's output. Sub-agents can now read each other's raw analysis, plans, and feedback directly. Enables cross-run learning from past issues via file overlap search. Also restricts parallel coder delegation to prevent duplicate PRs and wasted tokens.
+
+### Added
+- **`src/db/migrations/002_issue_context.sql`** — new table with GIN index on `files_touched`
+- **`src/issue-context-repository.ts`** — `IssueContextRepository` interface, types, and `InMemoryIssueContextRepository`
+- **`src/db/pg-issue-context-repository.ts`** — `PostgresIssueContextRepository` with `&&` array overlap search
+- **`src/context-tools.ts`** — three LangChain tools: `save_issue_context`, `get_issue_context`, `search_past_issues`
+- Auto-capture backstop: subagent outputs saved as context entries automatically
+- 24 new tests — **564 tests total**
+
+### Changed
+- `createArchitect()` builds per-agent context tools; all sub-agent prompts include "SHARED CONTEXT" instructions
+- Parallel delegation restricted to issues with explicit sub-issues only
+- Architect must always pass exact issue number when delegating to coder
+- `Repositories`, `ProcessManager`, `DashboardOptions`, CLI all forward `contextRepo`
+
+---
+
+## v1.10.0 — 2026-02-16
+
+**Unified Process Tracking.** All code paths that call `runArchitect()` — dashboard UI, poll cycle, and webhook — now create `AgentProcess` records in the database. The Processes tab becomes the single source of truth for all runs. The History tab (which only showed poll-cycle data from `last_poll.json`) is removed.
+
+### Added
+- **Poll cycle process tracking** in `src/core.ts` — `runPollCycle()` accepts optional `processRepository` and saves an `AgentProcess` record after each `runArchitect()` call (both success and failure)
+- **Standalone webhook process tracking** in `src/listener.ts` — `handleIssuesEvent()` accepts optional `processRepository` and saves `AgentProcess` records; `handleWebhookEvent()` threads the repository through
+- **Unified webhook routing** in `src/dashboard.ts` — `issues.opened` events in unified server mode are routed through `processManager.startAnalysis()` instead of `handleWebhookEvent()`, giving full process tracking + SSE live updates
+
+### Removed
+- **`/api/history` endpoint** from `src/dashboard.ts` — no longer needed
+- **`getHistory()` method** from `ProcessManager` — no longer needed
+- **`loadPollState` import** from `src/process-manager.ts` — no longer needed
+- **History tab** from `static/dashboard.html` — `HistoryPanel` and `HistoryDetailContent` components removed; tabs reduced from Processes/History/Usage to Processes/Usage
+- **History-related state** from dashboard `App` component — `selectedHistoryIssue`, `selectedHistoryActions`, `handleHistorySelect`, history fetch call all removed
+- **`GET /api/history` test** from `tests/dashboard.test.ts`
+- **`getHistory` tests** and `loadPollState` mock from `tests/process-manager.test.ts`
+
+### Changed
+- `src/cli.ts` passes `processRepository` to `runPollCycle()` options
+- Dashboard tabs reduced from 3 (Processes, History, Usage) to 2 (Processes, Usage)
+- **561 tests** across 17 test files (was 563 — removed 2 history tests)
+
+---
+
+## v1.9.0 — 2026-02-16
+
+**Conversation Pruning at Iteration Boundaries.** Adds middleware that compresses old review-fix cycle messages before each model call, reducing context bloat during multi-iteration Architect runs. After 2+ completed reviewer round-trips, previous iterations' task responses are truncated and non-task tool results are cleared, keeping critical facts (PR numbers, verdicts, branch names) while shedding verbosity.
+
+### Added
+- **`src/context-pruning.ts`** — new module with `createIterationPruningMiddleware()` factory
+  - Uses `createMiddleware` from `langchain` with a `wrapModelCall` hook that mutates `request.messages` in-place before each model call
+  - `findIterationBoundaries()`: detects completed review-fix cycles by finding reviewer task delegation + response pairs
+  - `compressOldIterations()`: truncates old task ToolMessage content to 500 chars (configurable), truncates AIMessage `args.prompt` to 200 chars, replaces non-task ToolMessages with `[Previous iteration tool result cleared]`
+  - Configurable via `maxCompressedLength` option
+- 21 new tests in `tests/context-pruning.test.ts` — boundary detection, compression, preservation of latest iteration, interleaved verification tools, edge cases — **540 tests total**
+
+### Changed
+- `createArchitect()` in `src/architect.ts` passes `middleware: [createIterationPruningMiddleware()]` to `createDeepAgent`
+
+---
+
 ## v1.8.0 — 2026-02-15
 
 **Shared File Cache for the Architect Pipeline.** Adds an in-memory file cache shared across all subagents within a single `runArchitect()` call. File contents, directory listings, and PR diffs are cached so that when multiple subagents (issuer, coder, reviewer) read the same files, only the first call hits the GitHub API. Write operations automatically invalidate affected cache entries. Expected to cut input tokens by 30-40% on typical runs.

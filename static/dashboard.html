@@ -46,7 +46,7 @@
       Dialog, DialogTitle, DialogContent, DialogActions,
       TextField, FormControlLabel, Checkbox, Tooltip,
       CircularProgress, Alert, Stepper, Step, StepLabel,
-      Select, MenuItem, FormControl, InputLabel,
+      Select, MenuItem, FormControl, InputLabel, Autocomplete,
     } from '@mui/material';
 
     const { useState, useEffect, useRef, useCallback, createElement: h, Fragment } = React;
@@ -448,9 +448,11 @@
       const [contBranch, setContBranch] = useState('');
 
       const activeRepos = (repos || []).filter(r => r.isActive);
+      const selectedRepo = activeRepos.find(r => String(r.id) === selectedRepoId) || null;
 
       function handleSubmit() {
-        const repoId = selectedRepoId !== '' ? Number(selectedRepoId) : undefined;
+        if (!selectedRepoId) return;
+        const repoId = Number(selectedRepoId);
         if (tab === 0) {
           const num = parseInt(issueNumber, 10);
           if (!num || num < 1) return;
@@ -487,21 +489,17 @@
       return h(Dialog, { open, onClose, maxWidth: 'xs', fullWidth: true, PaperProps: { sx: { background: '#16213e' } } },
         h(DialogTitle, null, 'Start New Process'),
         h(DialogContent, null,
-          activeRepos.length > 1
-            ? h(FormControl, { fullWidth: true, size: 'small', sx: { mb: 2, mt: 1 } },
-                h(InputLabel, null, 'Repository'),
-                h(Select, {
-                  value: selectedRepoId,
-                  label: 'Repository',
-                  onChange: (e) => setSelectedRepoId(e.target.value),
-                },
-                  h(MenuItem, { value: '' }, 'Default (from config)'),
-                  ...activeRepos.map(r =>
-                    h(MenuItem, { key: r.id, value: String(r.id) }, `${r.owner}/${r.repo}`)
-                  ),
-                ),
-              )
-            : null,
+          h(Autocomplete, {
+            options: activeRepos,
+            value: selectedRepo,
+            onChange: (_, v) => setSelectedRepoId(v ? String(v.id) : ''),
+            getOptionLabel: (r) => `${r.owner}/${r.repo}`,
+            isOptionEqualToValue: (opt, val) => opt.id === val.id,
+            size: 'small',
+            fullWidth: true,
+            renderInput: (params) => h(TextField, { ...params, label: 'Repository', required: true, sx: { mt: 1 } }),
+            sx: { mb: 2 },
+          }),
           h(Tabs, { value: tab, onChange: (_, v) => setTab(v), sx: { mb: 2 } },
             h(Tab, { label: 'Analyze Issue' }),
             h(Tab, { label: 'Review PR' }),

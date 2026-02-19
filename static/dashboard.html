@@ -46,7 +46,7 @@
       Dialog, DialogTitle, DialogContent, DialogActions,
       TextField, FormControlLabel, Checkbox, Tooltip,
       CircularProgress, Alert, Stepper, Step, StepLabel,
-      Select, MenuItem, FormControl, InputLabel, Autocomplete,
+      Select, MenuItem, FormControl, InputLabel, Autocomplete, Switch,
     } from '@mui/material';
 
     const { useState, useEffect, useRef, useCallback, createElement: h, Fragment } = React;
@@ -1113,6 +1113,111 @@
       );
     }
 
+    // ── SettingsPanel ──────────────────────────────────────────────────────────
+
+    function SettingsPanel({ settings, onSettingsChange }) {
+      const defaults = { notifyOnPr: true, notifyOnIssue: true, dialogId: '' };
+      const bitrix = settings.bitrix ? { ...defaults, ...settings.bitrix } : defaults;
+      const [saving, setSaving] = useState(false);
+      const [testing, setTesting] = useState(false);
+      const [testResult, setTestResult] = useState(null);
+      const [local, setLocal] = useState(bitrix);
+
+      // Sync local state when prop changes
+      useEffect(() => {
+        const b = settings.bitrix ? { ...defaults, ...settings.bitrix } : defaults;
+        setLocal(b);
+      }, [settings.bitrix]);
+
+      function update(field, value) {
+        setLocal(prev => ({ ...prev, [field]: value }));
+      }
+
+      async function handleSave() {
+        setSaving(true);
+        try {
+          await fetch('/api/settings/bitrix', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(local),
+          });
+          onSettingsChange({ ...settings, bitrix: local });
+        } catch {}
+        setSaving(false);
+      }
+
+      async function handleTest() {
+        if (!local.dialogId) return;
+        setTesting(true);
+        setTestResult(null);
+        try {
+          const res = await fetch('/api/settings/bitrix/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dialogId: local.dialogId }),
+          });
+          const data = await res.json();
+          setTestResult(data.ok ? { ok: true } : { ok: false, error: data.error });
+        } catch (e) {
+          setTestResult({ ok: false, error: 'Network error' });
+        }
+        setTesting(false);
+      }
+
+      const dirty = JSON.stringify(local) !== JSON.stringify(bitrix);
+
+      return h(Paper, { sx: { p: 3, background: '#16213e' } },
+        h(Typography, { variant: 'h6', sx: { mb: 1 } }, 'Bitrix24 Notifications'),
+        h(Typography, { variant: 'body2', color: 'text.secondary', sx: { mb: 2 } },
+          'Send notifications to a Bitrix24 chat when agents create PRs or issues. Connection details (BITRIX_BASE_URL, BITRIX_USER_ID, BITRIX_WEBHOOK_ID) are set in the .env file.',
+        ),
+        h(FormControlLabel, {
+          control: h(Switch, {
+            checked: local.notifyOnPr,
+            onChange: (e) => update('notifyOnPr', e.target.checked),
+          }),
+          label: 'Send new PR notifications',
+          sx: { display: 'block', mb: 1 },
+        }),
+        h(FormControlLabel, {
+          control: h(Switch, {
+            checked: local.notifyOnIssue,
+            onChange: (e) => update('notifyOnIssue', e.target.checked),
+          }),
+          label: 'Send new issue notifications',
+          sx: { display: 'block', mb: 2 },
+        }),
+        h(TextField, {
+          label: 'Dialog ID',
+          fullWidth: true,
+          size: 'small',
+          value: local.dialogId || '',
+          onChange: (e) => update('dialogId', e.target.value),
+          sx: { mb: 2 },
+          placeholder: 'chat2589',
+        }),
+        h(Box, { sx: { display: 'flex', gap: 2, alignItems: 'center' } },
+          h(Button, {
+            variant: 'contained',
+            onClick: handleSave,
+            disabled: !dirty || saving,
+          }, saving ? 'Saving...' : 'Save'),
+          h(Button, {
+            variant: 'outlined',
+            onClick: handleTest,
+            disabled: !local.dialogId || testing,
+          }, testing ? 'Sending...' : 'Send Test Message'),
+        ),
+        testResult
+          ? h(Alert, {
+              severity: testResult.ok ? 'success' : 'error',
+              sx: { mt: 2 },
+              onClose: () => setTestResult(null),
+            }, testResult.ok ? 'Test message sent successfully' : testResult.error)
+          : null,
+      );
+    }
+
     // ── App ────────────────────────────────────────────────────────────────────
 
     function App() {
@@ -1128,6 +1233,7 @@
       const [repos, setRepos] = useState([]);
       const [pricing, setPricing] = useState([]);
       const [pricingDefaults, setPricingDefaults] = useState([]);
+      const [settings, setSettings] = useState({});
 
       // Fetch initial data
       useEffect(() => {
@@ -1136,6 +1242,7 @@
         fetch('/api/repos?activeOnly=false').then(r => r.json()).then(setRepos).catch(() => {});
         fetch('/api/pricing').then(r => r.ok ? r.json() : []).then(setPricing).catch(() => {});
         fetch('/api/pricing/defaults').then(r => r.json()).then(setPricingDefaults).catch(() => {});
+        fetch('/api/settings').then(r => r.ok ? r.json() : {}).then(setSettings).catch(() => {});
       }, []);
 
       // SSE connection with auto-reconnect
@@ -1313,6 +1420,7 @@
                   h(Tab, { label: 'Usage' }),
                   h(Tab, { label: 'Repos' }),
                   h(Tab, { label: 'Pricing' }),
+                  h(Tab, { label: 'Settings' }),
                 ),
                 tab === 0
                   ? h(ProcessesTable, { processes, onSelect: handleSelect, onCancel: handleCancel })
@@ -1320,7 +1428,9 @@
                     ? h(UsagePanel, { refreshKey: usageRefreshKey })
                     : tab === 2
                       ? h(ReposPanel, { repos, onReposChange: setRepos })
-                      : h(PricingPanel, { pricing, defaults: pricingDefaults, onPricingChange: setPricing }),
+                      : tab === 3
+                        ? h(PricingPanel, { pricing, defaults: pricingDefaults, onPricingChange: setPricing })
+                        : h(SettingsPanel, { settings, onSettingsChange: setSettings }),
               ),
         ),
 

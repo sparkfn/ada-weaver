@@ -46,6 +46,8 @@ import type { AgentRole, LLMProvider } from './usage-types.js';
 import type { IssueContextRepository } from './issue-context-repository.js';
 import { createSaveContextTool, createGetContextTool, createSearchPastIssuesTool } from './context-tools.js';
 import { wrapWithOutputCap } from './tool-output-cap.js';
+import { wrapPrToolWithNotification, wrapIssueToolWithNotification } from './bitrix-notification.js';
+import type { SettingsRepository } from './settings-repository.js';
 
 // ── Result interface ────────────────────────────────────────────────────────
 
@@ -343,10 +345,19 @@ export function createCoderSubagent(
   owner: string,
   repo: string,
   octokit: Octokit,
-  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; workspacePath: string; contextTools?: ReturnType<typeof tool>[] },
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; workspacePath: string; contextTools?: ReturnType<typeof tool>[]; config?: Config; settingsRepo?: SettingsRepository },
 ): SubAgent {
   const dryRun = opts.dryRun ?? false;
   const ws: Workspace = { path: opts.workspacePath, cleanup: async () => {} };
+
+  const prTool = dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit);
+  const subIssueTool = dryRun ? createDryRunCreateSubIssueTool() : createCreateSubIssueTool(owner, repo, octokit);
+
+  // Wrap PR and sub-issue tools with Bitrix notification hooks
+  if (opts.config) {
+    wrapPrToolWithNotification(prTool, opts.config, opts.settingsRepo, owner, repo);
+    wrapIssueToolWithNotification(subIssueTool, opts.config, opts.settingsRepo, owner, repo);
+  }
 
   const tools = [
     createLocalListFilesTool(ws),
@@ -356,8 +367,8 @@ export function createCoderSubagent(
     dryRun ? createDryRunWriteFileTool() : createLocalWriteFileTool(ws),
     dryRun ? createDryRunBashTool() : createLocalBashTool(ws),
     dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
-    dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit),
-    dryRun ? createDryRunCreateSubIssueTool() : createCreateSubIssueTool(owner, repo, octokit),
+    prTool,
+    subIssueTool,
     ...(opts.contextTools ?? []),
   ].map(t => wrapWithOutputCap(t));
 
@@ -601,6 +612,7 @@ export async function createArchitect(
     contextRepo?: IssueContextRepository;
     repoId?: number;
     continueContext?: ContinueContext;
+    settingsRepo?: SettingsRepository;
   } = {},
 ) {
   const { owner, repo } = config.github;
@@ -668,7 +680,7 @@ export async function createArchitect(
   // Build subagents with workspace path
   const subagents = [
     createIssuerSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: issuerModel, workspacePath: workspace.path, contextTools: issuerContextTools }),
-    createCoderSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: coderModel, workspacePath: workspace.path, contextTools: coderContextTools }),
+    createCoderSubagent(owner, repo, octokit, { dryRun: options.dryRun, model: coderModel, workspacePath: workspace.path, contextTools: coderContextTools, config, settingsRepo: options.settingsRepo }),
     createReviewerSubagent(owner, repo, octokit, reviewerModel, { workspacePath: workspace.path, cache, contextTools: reviewerContextTools }),
   ];
 
@@ -830,7 +842,7 @@ export interface ContinueContext {
 export async function runArchitect(
   config: Config,
   issueNumber: number,
-  options: { dryRun?: boolean; onProgress?: (update: ProgressUpdate) => void; signal?: AbortSignal; continueContext?: ContinueContext; usageService?: UsageService; processId?: string; contextRepo?: IssueContextRepository; repoId?: number } = {},
+  options: { dryRun?: boolean; onProgress?: (update: ProgressUpdate) => void; signal?: AbortSignal; continueContext?: ContinueContext; usageService?: UsageService; processId?: string; contextRepo?: IssueContextRepository; repoId?: number; settingsRepo?: SettingsRepository } = {},
 ): Promise<ArchitectResult> {
   const maxIterations = getMaxIterations(config);
 
@@ -859,6 +871,7 @@ export async function runArchitect(
     contextRepo: options.contextRepo,
     repoId: options.repoId,
     continueContext: options.continueContext,
+    settingsRepo: options.settingsRepo,
   });
 
   // Octokit client for diff fetching after coder completes

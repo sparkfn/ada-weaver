@@ -9,6 +9,27 @@
 
 ---
 
+## v2.7.0 — 2026-02-19
+
+**Bitrix24 notifications & app settings.** Agents now send real-time notifications to a Bitrix24 chat when they create PRs or sub-issues. Configuration is managed through a new Settings tab in the dashboard (on/off toggle, base URL, user ID, webhook ID, dialog ID) and persisted to a `settings` key-value table in PostgreSQL. The notification hooks use a tool-wrapping pattern — the `create_pull_request` and `create_sub_issue` tools are wrapped to fire notifications on success without changing the tool interface.
+
+### Added
+- **Bitrix24 notification handler** (`src/bitrix-notification.ts`) — sends BB-code messages to a Bitrix24 chat via REST API on PR or issue creation
+- **Tool wrappers** `wrapPrToolWithNotification` / `wrapIssueToolWithNotification` — monkey-patch tool `invoke()` to fire notifications after successful creation (same pattern as `wrapWithOutputCap`)
+- **Settings repository** (`src/settings-repository.ts`) — generic key-value store interface with `get`/`set`/`getAll`/`delete`; in-memory + PostgreSQL implementations
+- **DB migration** `004_settings.sql` — `settings` table (TEXT primary key + JSONB value)
+- **Settings API** — `GET /api/settings`, `GET /api/settings/:key`, `PUT /api/settings/:key`, `DELETE /api/settings/:key`
+- **Dashboard Settings tab** — Bitrix24 configuration panel with on/off switch, text fields for all connection params, save button
+- **Workspace branch fetch** — after unshallow, runs `git remote set-branches origin "*"` + `git fetch --all` so non-default branches are available for base branch checkout
+
+### Changed
+- Coder prompt now includes `git fetch origin <base_branch>` before `git checkout` to ensure remote branches are available
+- `ProcessManager` constructor accepts optional `settingsRepo` parameter, threaded through to `runArchitect` → `createArchitect` → `createCoderSubagent`
+- `DashboardOptions` extended with `settingsRepository`
+- New process dialog requires repo selection (searchable Autocomplete, always visible)
+
+---
+
 ## v2.6.0 — 2026-02-16
 
 **Lean agent middleware & pricing CRUD.** Two major changes: (1) Switched all 4 agent entry points from `createDeepAgent` (deepagents library) to `createAgent` (langchain) with manually selected middleware — eliminating ~1,980 tokens/call of unused overhead from `todoListMiddleware`, `createFilesystemMiddleware` (duplicate tools), and `BASE_PROMPT`. Combined with lowered caps, estimated 30-45% reduction in input token usage. (2) Added a pricing management system with CRUD API, DB persistence, dashboard UI, and GPT-5.2 support. (3) Retroactive cost recalculation — old records with $0 cost now show correct costs based on current pricing.

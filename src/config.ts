@@ -101,6 +101,16 @@ export function loadConfig() {
     };
   }
 
+  // bitrix notifications (connection details from env, toggles from DB settings)
+  const bitrixWebhookId = process.env.BITRIX_WEBHOOK_ID;
+  if (bitrixWebhookId) {
+    config.bitrix = {
+      baseUrl: process.env.BITRIX_BASE_URL || 'https://hq.ada.asia',
+      userId: process.env.BITRIX_USER_ID || '103726',
+      webhookId: bitrixWebhookId,
+    };
+  }
+
   // Validate required fields
   if (!config.github.owner || !config.github.repo) {
     console.error('❌ Missing required config: GITHUB_OWNER and GITHUB_REPO. Copy .env.example to .env and fill in your credentials.');

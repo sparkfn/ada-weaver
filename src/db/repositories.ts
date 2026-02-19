@@ -11,6 +11,8 @@ import type { IssueContextRepository } from '../issue-context-repository.js';
 import { InMemoryIssueContextRepository } from '../issue-context-repository.js';
 import type { PricingRepository } from '../pricing-repository.js';
 import { InMemoryPricingRepository } from '../pricing-repository.js';
+import type { SettingsRepository } from '../settings-repository.js';
+import { InMemorySettingsRepository } from '../settings-repository.js';
 import { initPool } from './connection.js';
 import { runMigrations } from './migrate.js';
 import { PostgresRepoRepository } from './pg-repo-repository.js';
@@ -19,6 +21,7 @@ import { PostgresUsageRepository } from './pg-usage-repository.js';
 import { PostgresProcessRepository } from './pg-process-repository.js';
 import { PostgresIssueContextRepository } from './pg-issue-context-repository.js';
 import { PostgresPricingRepository } from './pg-pricing-repository.js';
+import { PostgresSettingsRepository } from './pg-settings-repository.js';
 
 export interface Repositories {
   repoRepository: RepoRepository;
@@ -27,6 +30,7 @@ export interface Repositories {
   usageRepository: UsageRepository;
   issueContextRepository: IssueContextRepository;
   pricingRepository: PricingRepository;
+  settingsRepository: SettingsRepository;
   repoId: number;
 }
 
@@ -63,6 +67,7 @@ export async function createRepositories(config: Config): Promise<Repositories> 
       usageRepository: new PostgresUsageRepository(pool, repoId),
       issueContextRepository: new PostgresIssueContextRepository(pool, repoId),
       pricingRepository: new PostgresPricingRepository(pool),
+      settingsRepository: new PostgresSettingsRepository(pool),
       repoId,
     };
   }
@@ -76,6 +81,7 @@ export async function createRepositories(config: Config): Promise<Repositories> 
     usageRepository: new InMemoryUsageRepository(),
     issueContextRepository: new InMemoryIssueContextRepository(),
     pricingRepository: new InMemoryPricingRepository(),
+    settingsRepository: new InMemorySettingsRepository(),
     repoId: 0,
   };
 }

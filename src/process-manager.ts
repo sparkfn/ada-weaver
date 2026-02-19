@@ -7,6 +7,7 @@ import type { UsageService } from './usage-service.js';
 import type { ProcessRepository } from './process-repository.js';
 import type { IssueContextRepository } from './issue-context-repository.js';
 import type { RepoRepository } from './repo-repository.js';
+import type { SettingsRepository } from './settings-repository.js';
 
 // ── Interfaces ───────────────────────────────────────────────────────────────
 
@@ -58,8 +59,9 @@ export class ProcessManager extends EventEmitter {
   private issueContextRepo?: IssueContextRepository;
   private repoId: number;
   private repoRepo?: RepoRepository;
+  private settingsRepo?: SettingsRepository;
 
-  constructor(config: Config, usageService?: UsageService, processRepo?: ProcessRepository, issueContextRepo?: IssueContextRepository, repoId?: number, repoRepo?: RepoRepository) {
+  constructor(config: Config, usageService?: UsageService, processRepo?: ProcessRepository, issueContextRepo?: IssueContextRepository, repoId?: number, repoRepo?: RepoRepository, settingsRepo?: SettingsRepository) {
     super();
     this.config = config;
     this.usageService = usageService;
@@ -67,6 +69,7 @@ export class ProcessManager extends EventEmitter {
     this.issueContextRepo = issueContextRepo;
     this.repoId = repoId ?? 0;
     this.repoRepo = repoRepo;
+    this.settingsRepo = settingsRepo;
   }
 
   private async resolveRepoConfig(repoId?: number): Promise<{ config: Config; owner: string; repo: string; resolvedRepoId: number }> {
@@ -289,6 +292,7 @@ export class ProcessManager extends EventEmitter {
         processId: proc.id,
         contextRepo: this.issueContextRepo,
         repoId: resolvedRepoId,
+        settingsRepo: this.settingsRepo,
       });
 
       if (signal.aborted) return; // already marked cancelled

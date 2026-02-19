@@ -6603,3 +6603,55 @@ This is a pattern worth noting: when a table row is already clickable, a separat
 - **Entry 50** (PostgreSQL Persistence): The multi-repo schema was designed in v1.7.0 but never exposed to users. This entry unlocks that schema for actual multi-repo use.
 - **Entry 47** (Web Dashboard): The Repos tab is the third tab after Processes and Usage, following the same MUI component patterns.
 - **Entry 48** (Parallel Subagent Support): Per-process repo resolution is orthogonal to parallelism — each parallel subagent inherits the resolved config from its parent process.
+
+---
+
+## Entry 63: Bitrix24 Notifications & App Settings (v2.7.0)
+
+**Date:** 2026-02-19
+**Author:** Architect Agent
+
+### The problem
+
+When agents create PRs or sub-issues, there's no notification to the team. The user wanted real-time Bitrix24 chat notifications so the team is aware of agent activity without watching the dashboard.
+
+### Solution: tool-wrapping pattern
+
+Rather than adding notification logic inside the tool definitions (which would couple GitHub tools to Bitrix), the notification hooks use the same monkey-patch wrapping pattern as `wrapWithOutputCap`:
+
+```
+wrapPrToolWithNotification(prTool, settingsRepo, owner, repo)
+```
+
+The wrapper intercepts the tool's `invoke()` return value, parses the JSON result, and if it's a successful creation (not skipped, not an error), fires a notification asynchronously (fire-and-forget via `.catch(() => {})`). The original tool result is returned unchanged.
+
+This pattern is composable — the same tool goes through multiple wraps: notification → output cap. Each wrapper adds behavior without changing the tool's interface.
+
+### Settings architecture
+
+Instead of env vars, Bitrix settings are stored in a `settings` DB table (key-value with JSONB values). This enables runtime configuration through the dashboard without restarting the server.
+
+The `SettingsRepository` interface is generic (not Bitrix-specific):
+```
+get<T>(key) / set<T>(key, value) / getAll() / delete(key)
+```
+
+Bitrix config is stored under the key `"bitrix"` as a single JSON object with `enabled`, `baseUrl`, `userId`, `webhookId`, `dialogId` fields. The `enabled` boolean acts as the on/off switch.
+
+### Workspace branch fix
+
+A subtle bug: `git clone --depth 1` implies `--single-branch`, so the workspace only had the default branch. When the Coder tried to `git checkout feature/web-rtc` (a base branch specified in the issue), it failed because no remote-tracking ref existed.
+
+Fix: after `git fetch --unshallow`, the workspace now runs:
+```
+git remote set-branches origin "*"
+git fetch --all
+```
+
+This opens up the refspec to track all remote branches, making any branch available for checkout. The Coder prompt was also updated to include `git fetch origin <base_branch>` before checkout as a belt-and-suspenders safety measure.
+
+### Connections to previous entries
+
+- **Entry 60** (Tool Output Cap): The notification wrapper uses the exact same monkey-patch pattern (`originalInvoke = tool.invoke.bind(tool); tool.invoke = async (...) => { ... }`)
+- **Entry 62** (Lean Middleware): The notification flows through the same tool chain: notification wrap → output cap wrap → agent invocation
+- **Entry 50** (PostgreSQL Persistence): The settings table follows the same migration pattern (004_settings.sql) and the dual in-memory/PG repository approach

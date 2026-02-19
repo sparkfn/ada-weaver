@@ -11,6 +11,8 @@ import type { ProcessRepository } from './process-repository.js';
 import type { IssueContextRepository } from './issue-context-repository.js';
 import type { RepoRepository } from './repo-repository.js';
 import type { PricingRepository } from './pricing-repository.js';
+import type { SettingsRepository } from './settings-repository.js';
+import { sendTestNotification } from './bitrix-notification.js';
 import { PRICING_TABLE, setPricingLookup, buildPricingLookup } from './usage-pricing.js';
 import { verifySignature, handleWebhookEvent } from './listener.js';
 import { chatStream } from './chat-agent.js';
@@ -57,13 +59,14 @@ export interface DashboardOptions {
   issueContextRepository?: IssueContextRepository;
   repoRepository?: RepoRepository;
   pricingRepository?: PricingRepository;
+  settingsRepository?: SettingsRepository;
   repoId?: number;
 }
 
 export function createDashboardApp(config: Config, options?: DashboardOptions): { app: express.Express; processManager: ProcessManager; usageService: UsageService } {
   const app = express();
   const usageService = new UsageService(options?.usageRepository);
-  const processManager = new ProcessManager(config, usageService, options?.processRepository, options?.issueContextRepository, options?.repoId, options?.repoRepository);
+  const processManager = new ProcessManager(config, usageService, options?.processRepository, options?.issueContextRepository, options?.repoId, options?.repoRepository, options?.settingsRepository);
 
   // Parse JSON for all routes except /webhook (which needs the raw body for HMAC)
   app.use((req, res, next) => {
@@ -334,6 +337,42 @@ export function createDashboardApp(config: Config, options?: DashboardOptions): 
     }
     await refreshPricingLookup();
     res.json({ deleted: true });
+  });
+
+  // ── Settings API endpoints ───────────────────────────────────────────────────
+
+  app.get('/api/settings', async (_req: Request, res: Response) => {
+    if (!options?.settingsRepository) { res.json({}); return; }
+    res.json(await options.settingsRepository.getAll());
+  });
+
+  app.get('/api/settings/:key', async (req: Request, res: Response) => {
+    if (!options?.settingsRepository) { res.json(null); return; }
+    const val = await options.settingsRepository.get(req.params.key);
+    res.json(val ?? null);
+  });
+
+  app.put('/api/settings/:key', async (req: Request, res: Response) => {
+    if (!options?.settingsRepository) { res.status(503).json({ error: 'No database configured' }); return; }
+    await options.settingsRepository.set(req.params.key, req.body);
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/settings/:key', async (req: Request, res: Response) => {
+    if (!options?.settingsRepository) { res.status(503).json({ error: 'No database configured' }); return; }
+    const deleted = await options.settingsRepository.delete(req.params.key);
+    res.json({ deleted });
+  });
+
+  app.post('/api/settings/bitrix/test', async (req: Request, res: Response) => {
+    const { dialogId } = req.body as { dialogId?: string };
+    if (!dialogId) { res.status(400).json({ error: 'dialogId is required' }); return; }
+    const result = await sendTestNotification(config, dialogId);
+    if (result.ok) {
+      res.json({ ok: true });
+    } else {
+      res.status(502).json({ error: result.error });
+    }
   });
 
   // ── Usage API endpoints ─────────────────────────────────────────────────────

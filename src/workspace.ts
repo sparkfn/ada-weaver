@@ -100,6 +100,14 @@ export async function createWorkspace(
     // Already unshallowed or full clone — safe to ignore
   }
 
+  // Enable tracking all remote branches (--depth 1 implies --single-branch)
+  try {
+    execSync('git remote set-branches origin "*"', { cwd: workspacePath, stdio: 'pipe' });
+    execSync('git fetch --all', { cwd: workspacePath, stdio: 'pipe', timeout: 60_000 });
+  } catch {
+    // Best-effort — non-default branches may not be available
+  }
+
   const cleanup = async () => {
     // Safety: only remove paths inside .workspaces/
     const expectedPrefix = getWorkspacesRoot() + path.sep;

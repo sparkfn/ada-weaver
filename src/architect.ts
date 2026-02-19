@@ -404,7 +404,7 @@ WORKFLOW FOR NEW ISSUES:
    \`\`\`
    bash: git checkout -b issue-<number>-<short-description>
    \`\`\`
-   - If the Architect specifies a base branch, first: \`git checkout <base_branch> && git checkout -b issue-<number>-<short-description>\`
+   - If the Architect specifies a base branch, first: \`git fetch origin <base_branch> && git checkout <base_branch> && git checkout -b issue-<number>-<short-description>\`
 3. Make changes using edit_file (for surgical edits to existing files) or write_file (for new files or full rewrites)
    - Prefer edit_file over write_file for existing files — it's surgical and preserves surrounding code
    - Use read_file first to see current content before editing

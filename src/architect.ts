@@ -238,33 +238,14 @@ export function extractTaskInput(data: any): { subagentType: string; description
   return { subagentType: 'unknown', description: '', prompt: '' };
 }
 
-// ── Subagent builders ────────────────────────────────────────────────────────
+// ── System prompt builders ───────────────────────────────────────────────────
 
 /**
- * Create the Issuer subagent — understands issues, explores repo, produces a brief,
- * and posts a formatted analysis comment on the issue.
+ * Build the Issuer system prompt.
+ * Extracted so both the LangChain subagent and Claude SDK agent can reuse it.
  */
-export function createIssuerSubagent(
-  owner: string,
-  repo: string,
-  octokit: Octokit,
-  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; workspacePath: string; contextTools?: ReturnType<typeof tool>[] },
-): SubAgent {
-  const dryRun = opts.dryRun ?? false;
-  const ws: Workspace = { path: opts.workspacePath, cleanup: async () => {} };
-
-  const tools = [
-    createGitHubIssuesTool(owner, repo, octokit),
-    createLocalListFilesTool(ws),
-    createLocalReadFileTool(ws),
-    createLocalGrepTool(ws),
-    createFetchSubIssuesTool(owner, repo, octokit),
-    createGetParentIssueTool(owner, repo, octokit),
-    dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
-    ...(opts.contextTools ?? []),
-  ].map(t => wrapWithOutputCap(t));
-
-  const systemPrompt = `You are the Issuer agent for the GitHub repository ${owner}/${repo}.
+export function buildIssuerSystemPrompt(owner: string, repo: string): string {
+  return `You are the Issuer agent for the GitHub repository ${owner}/${repo}.
 
 Your job is to thoroughly understand a GitHub issue, produce a brief for the team, and post a formatted analysis comment on the issue itself.
 
@@ -327,52 +308,14 @@ TOOL USAGE:
 SHARED CONTEXT:
 - After your analysis, save your brief with \`save_issue_context\` (entry_type: "issuer_brief"). Include the files you identified in files_touched.
 - Use \`search_past_issues\` to check if similar issues have been resolved before — pass the relevant file paths to find overlap.`;
-
-  return {
-    name: 'issuer',
-    description: 'Understands GitHub issues — explores the repo, reads relevant files, posts a formatted analysis comment on the issue, and produces a brief with issue summary, type, complexity, relevant files, and recommended approach.',
-    systemPrompt,
-    tools,
-    ...(opts.model ? { model: opts.model } : {}),
-  };
 }
 
 /**
- * Create the Coder subagent — implements changes (branches, commits, PRs).
- * Has read + write tools. Respects dry-run mode.
+ * Build the Coder system prompt.
+ * Extracted so both the LangChain subagent and Claude SDK agent can reuse it.
  */
-export function createCoderSubagent(
-  owner: string,
-  repo: string,
-  octokit: Octokit,
-  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; workspacePath: string; contextTools?: ReturnType<typeof tool>[]; config?: Config; settingsRepo?: SettingsRepository },
-): SubAgent {
-  const dryRun = opts.dryRun ?? false;
-  const ws: Workspace = { path: opts.workspacePath, cleanup: async () => {} };
-
-  const prTool = dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit);
-  const subIssueTool = dryRun ? createDryRunCreateSubIssueTool() : createCreateSubIssueTool(owner, repo, octokit);
-
-  // Wrap PR and sub-issue tools with Bitrix notification hooks
-  if (opts.config) {
-    wrapPrToolWithNotification(prTool, opts.config, opts.settingsRepo, owner, repo);
-    wrapIssueToolWithNotification(subIssueTool, opts.config, opts.settingsRepo, owner, repo);
-  }
-
-  const tools = [
-    createLocalListFilesTool(ws),
-    createLocalReadFileTool(ws),
-    createLocalGrepTool(ws),
-    dryRun ? createDryRunEditFileTool() : createLocalEditFileTool(ws),
-    dryRun ? createDryRunWriteFileTool() : createLocalWriteFileTool(ws),
-    dryRun ? createDryRunBashTool() : createLocalBashTool(ws),
-    dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
-    prTool,
-    subIssueTool,
-    ...(opts.contextTools ?? []),
-  ].map(t => wrapWithOutputCap(t));
-
-  const systemPrompt = `You are the Coder agent for the GitHub repository ${owner}/${repo}.
+export function buildCoderSystemPrompt(owner: string, repo: string): string {
+  return `You are the Coder agent for the GitHub repository ${owner}/${repo}.
 
 Your job is to implement changes based on the Architect's instructions.
 
@@ -467,6 +410,81 @@ TESTING GUIDELINES (only when instructed by the Architect):
 SHARED CONTEXT:
 - Before planning, read shared context with \`get_issue_context\` to see the issuer's brief and architect's plan directly.
 - Save your execution plan with \`save_issue_context\` (entry_type: "coder_plan"). Include the files you plan to modify in files_touched.`;
+}
+
+// ── Subagent builders ────────────────────────────────────────────────────────
+
+/**
+ * Create the Issuer subagent — understands issues, explores repo, produces a brief,
+ * and posts a formatted analysis comment on the issue.
+ */
+export function createIssuerSubagent(
+  owner: string,
+  repo: string,
+  octokit: Octokit,
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; workspacePath: string; contextTools?: ReturnType<typeof tool>[] },
+): SubAgent {
+  const dryRun = opts.dryRun ?? false;
+  const ws: Workspace = { path: opts.workspacePath, cleanup: async () => {} };
+
+  const tools = [
+    createGitHubIssuesTool(owner, repo, octokit),
+    createLocalListFilesTool(ws),
+    createLocalReadFileTool(ws),
+    createLocalGrepTool(ws),
+    createFetchSubIssuesTool(owner, repo, octokit),
+    createGetParentIssueTool(owner, repo, octokit),
+    dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
+    ...(opts.contextTools ?? []),
+  ].map(t => wrapWithOutputCap(t));
+
+  const systemPrompt = buildIssuerSystemPrompt(owner, repo);
+
+  return {
+    name: 'issuer',
+    description: 'Understands GitHub issues — explores the repo, reads relevant files, posts a formatted analysis comment on the issue, and produces a brief with issue summary, type, complexity, relevant files, and recommended approach.',
+    systemPrompt,
+    tools,
+    ...(opts.model ? { model: opts.model } : {}),
+  };
+}
+
+/**
+ * Create the Coder subagent — implements changes (branches, commits, PRs).
+ * Has read + write tools. Respects dry-run mode.
+ */
+export function createCoderSubagent(
+  owner: string,
+  repo: string,
+  octokit: Octokit,
+  opts: { dryRun?: boolean; model?: ReturnType<typeof createModel>; workspacePath: string; contextTools?: ReturnType<typeof tool>[]; config?: Config; settingsRepo?: SettingsRepository },
+): SubAgent {
+  const dryRun = opts.dryRun ?? false;
+  const ws: Workspace = { path: opts.workspacePath, cleanup: async () => {} };
+
+  const prTool = dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit);
+  const subIssueTool = dryRun ? createDryRunCreateSubIssueTool() : createCreateSubIssueTool(owner, repo, octokit);
+
+  // Wrap PR and sub-issue tools with Bitrix notification hooks
+  if (opts.config) {
+    wrapPrToolWithNotification(prTool, opts.config, opts.settingsRepo, owner, repo);
+    wrapIssueToolWithNotification(subIssueTool, opts.config, opts.settingsRepo, owner, repo);
+  }
+
+  const tools = [
+    createLocalListFilesTool(ws),
+    createLocalReadFileTool(ws),
+    createLocalGrepTool(ws),
+    dryRun ? createDryRunEditFileTool() : createLocalEditFileTool(ws),
+    dryRun ? createDryRunWriteFileTool() : createLocalWriteFileTool(ws),
+    dryRun ? createDryRunBashTool() : createLocalBashTool(ws),
+    dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit),
+    prTool,
+    subIssueTool,
+    ...(opts.contextTools ?? []),
+  ].map(t => wrapWithOutputCap(t));
+
+  const systemPrompt = buildCoderSystemPrompt(owner, repo);
 
   return {
     name: 'coder',
@@ -856,6 +874,12 @@ export async function runArchitect(
   if (config.agentMode === 'single') {
     const { runSingleAgent } = await import('./single-agent.js');
     return runSingleAgent(config, issueNumber, options);
+  }
+
+  // Claude SDK mode: delegate to SDK runner
+  if (config.agentMode === 'claude-sdk') {
+    const { runClaudeSdkAgent } = await import('./claude-sdk-agent.js');
+    return runClaudeSdkAgent(config, issueNumber, options);
   }
 
   if (options.dryRun) {

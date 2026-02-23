@@ -65,7 +65,15 @@ export function loadConfig() {
     maxIssuesPerRun: parseIntEnv('MAX_ISSUES_PER_RUN'),
     maxToolCallsPerRun: parseIntEnv('MAX_TOOL_CALLS_PER_RUN'),
     maxIterations: parseIntEnv('MAX_ITERATIONS') ?? parseIntEnv('MAX_FEEDBACK_ITERATIONS'),
-    agentMode: (process.env.AGENT_MODE || 'multi') as 'single' | 'multi',
+    agentMode: (process.env.AGENT_MODE || 'multi') as 'single' | 'multi' | 'claude-sdk',
+    claudeSdk: {
+      maxTurns: parseIntEnv('CLAUDE_SDK_MAX_TURNS') ?? 200,
+      maxBudgetUsd: parseFloat(process.env.CLAUDE_SDK_MAX_BUDGET_USD || '0') || undefined,
+      permissionMode: (process.env.CLAUDE_SDK_PERMISSION_MODE || 'bypassPermissions') as
+        'acceptEdits' | 'bypassPermissions' | 'default',
+      model: process.env.CLAUDE_SDK_MODEL || undefined,
+      multi: process.env.CLAUDE_SDK_MULTI !== 'false',  // default true = use subagents
+    },
   };
 
   // issuerLlm (all-or-nothing: only if PROVIDER is set)
@@ -146,6 +154,18 @@ export function loadConfig() {
   if (!config.llm.apiKey && !localProviders.includes(config.llm.provider)) {
     console.error('❌ Missing LLM_API_KEY (required for cloud providers)');
     process.exit(1);
+  }
+
+  // claude-sdk validation
+  if (config.agentMode === 'claude-sdk') {
+    if (config.llm.provider !== 'anthropic') {
+      console.error('❌ AGENT_MODE=claude-sdk requires LLM_PROVIDER=anthropic');
+      process.exit(1);
+    }
+    if (!config.llm.apiKey) {
+      console.error('❌ AGENT_MODE=claude-sdk requires LLM_API_KEY');
+      process.exit(1);
+    }
   }
 
   // issuerLlm validation

@@ -185,6 +185,7 @@ Incremental improvements after the v1.0.0 milestone. These are not new phases �
 | v2.5.0 | Multi-repo CRUD — dashboard repo management, per-process repo selection, CRUD API routes | ✓ v2.5.0 |
 | v2.6.0 | Lean agent middleware & pricing CRUD — replace `createDeepAgent` with `createAgent`, lower caps, pricing DB + dashboard UI, retroactive cost recalculation, streamlined dashboard tables | ✓ v2.6.0 |
 | v2.7.0 | Bitrix24 notifications & app settings — send chat notifications on PR/issue creation, settings DB + dashboard config UI, workspace branch fetch for base branch checkout | ✓ v2.7.0 |
+| v2.8.0 | Claude Agent SDK integration — third execution mode (`claude-sdk`) using Anthropic's official SDK with native tools, MCP servers, subagent delegation, budget caps | ✓ v2.8.0 |
 
 ---
 

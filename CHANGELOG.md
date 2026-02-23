@@ -9,6 +9,43 @@
 
 ---
 
+## v2.8.0 — 2026-02-23
+
+**Claude Agent SDK integration.** Adds `AGENT_MODE=claude-sdk` as a third execution mode alongside `multi` and `single`. This mode uses Anthropic's official Claude Agent SDK — the same engine that powers Claude Code — providing native built-in tools (Read, Edit, Write, Bash, Glob, Grep), MCP server support, and native subagent delegation via the `Task` tool. GitHub and context tools are exposed as in-process MCP servers via `createSdkMcpServer`. Supports both single-agent and multi-agent (architect → issuer/coder/reviewer) patterns within the SDK, per-agent model selection (haiku/sonnet/opus), budget caps, and configurable permission modes.
+
+### Added
+- **`src/claude-sdk-agent.ts`** — Claude Agent SDK entry point with:
+  - `runClaudeSdkAgent()` — routes to single or multi-agent based on `CLAUDE_SDK_MULTI` config
+  - `runClaudeSdkSingleAgent()` — single agent with all built-in + MCP tools, adapted system prompt from `single-agent.ts`
+  - `runClaudeSdkMultiAgent()` — architect pattern with `AgentDefinition` objects for issuer/coder/reviewer subagents
+  - `adaptPromptForSdk()` — rewrites existing LangChain tool names to SDK equivalents (e.g., `read_file` → `Read`, `fetch_github_issues` → `mcp__github__fetch_github_issues`)
+  - `mapToSdkModel()` — maps per-agent LLM overrides to SDK model names (`haiku`/`sonnet`/`opus`/`inherit`)
+  - `detectPhaseFromToolCalls()` — phase detection from tool names for progress tracking
+  - Full integration with `ProcessManager` (progress events), `UsageService` (token/cost tracking), workspace lifecycle (clone → run → cleanup), and issue context system
+- **`src/claude-sdk-tools.ts`** — MCP server factories:
+  - `createGitHubMcpServer()` — wraps 9 GitHub API tools as an in-process MCP server (fetch issues, comment, create PR, get diff, submit review, check CI, sub-issues)
+  - `createContextMcpServer()` — wraps 3 context tools as an in-process MCP server (save/get/search context)
+  - All tools include idempotency checks, dry-run support, body/diff truncation, and error handling
+- **Claude SDK config section** in `config.ts`:
+  - `CLAUDE_SDK_MAX_TURNS` — circuit breaker equivalent (default: 200)
+  - `CLAUDE_SDK_MAX_BUDGET_USD` — cost cap per run (0 = unlimited)
+  - `CLAUDE_SDK_PERMISSION_MODE` — `acceptEdits` or `bypassPermissions`
+  - `CLAUDE_SDK_MODEL` — optional model override
+  - `CLAUDE_SDK_MULTI` — toggle single vs multi-agent SDK mode
+  - Validation: rejects `claude-sdk` mode without Anthropic provider or API key
+- **Mode routing** in `architect.ts` — `runArchitect()` dynamically imports `runClaudeSdkAgent` when `agentMode === 'claude-sdk'`
+- **`ROADMAP_CLAUDE_SDK.md`** — phased integration roadmap (9 phases from foundation to advanced features)
+- 34 new tests — **17** in `tests/claude-sdk-agent.test.ts` (prompt adaptation, model mapping, phase detection, single/multi agent flows, SDK options validation, error handling), **17** in `tests/claude-sdk-tools.test.ts` (GitHub MCP server, context MCP server, tool registration, handlers, idempotency, dry-run, edge cases) — **760 tests across 25 test files**
+
+### Changed
+- `AGENT_MODE` type widened from `'multi' | 'single'` to `'multi' | 'single' | 'claude-sdk'`
+- `.env.example` updated with Claude SDK configuration section
+
+### Dependencies
+- Added `@anthropic-ai/claude-agent-sdk` (production)
+
+---
+
 ## v2.7.0 — 2026-02-19
 
 **Bitrix24 notifications & app settings.** Agents now send real-time notifications to a Bitrix24 chat when they create PRs or sub-issues. Configuration is managed through a new Settings tab in the dashboard (on/off toggle, base URL, user ID, webhook ID, dialog ID) and persisted to a `settings` key-value table in PostgreSQL. The notification hooks use a tool-wrapping pattern — the `create_pull_request` and `create_sub_issue` tools are wrapped to fire notifications on success without changing the tool interface.

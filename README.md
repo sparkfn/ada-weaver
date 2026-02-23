@@ -26,9 +26,10 @@ A learning project for understanding Deep Agents / LangGraph patterns. An AI age
                     └─────────┘ └──────┘ └──────────┘
 ```
 
-**Two modes:**
+**Three execution modes:**
 - **Multi-agent** (default, `AGENT_MODE=multi`): Architect supervisor delegates to 3 specialist subagents
 - **Single-agent** (`AGENT_MODE=single`): One agent handles everything in a single context window with automatic context compaction
+- **Claude SDK** (`AGENT_MODE=claude-sdk`): Uses Anthropic's official Claude Agent SDK with native tools, MCP servers, and subagent delegation (Anthropic-only)
 
 When an issue is opened, the **Architect** supervisor coordinates three specialist subagents:
 1. **Issuer** — explores the repo and produces a brief (issue type, complexity, relevant files, approach)
@@ -46,6 +47,74 @@ Trigger via webhook (real-time) or poll (cron):
 GitHub  --webhook-->  deepagents webhook  -->  issues.opened  --> Architect
                                           -->  pull_request.opened --> Reviewer Agent
 ```
+
+## Current Features (v2.8.0)
+
+### Agent Pipeline
+- **Multi-agent mode** (`AGENT_MODE=multi`) — Architect supervisor delegates to Issuer, Coder, and Reviewer subagents with LLM-driven orchestration (non-deterministic workflow)
+- **Single-agent mode** (`AGENT_MODE=single`) — one agent handles the full issue lifecycle (analysis, planning, implementation, self-review, fix iterations) in a single context window
+- **Claude Agent SDK mode** (`AGENT_MODE=claude-sdk`) — uses Anthropic's official SDK (the same engine powering Claude Code) with native built-in tools (Read, Edit, Write, Bash, Glob, Grep), MCP server support, and native subagent delegation. Supports both single and multi-agent patterns via `CLAUDE_SDK_MULTI`. Configurable budget caps (`CLAUDE_SDK_MAX_BUDGET_USD`), turn limits, and permission modes
+- **Parallel subagents** — Architect can spawn concurrent coders/reviewers for independent sub-tasks
+- **Shared issue context** — all agents read/write to a shared context (like a Jira ticket), enabling cross-run learning from past issues via file overlap search
+- **Review-fix iterations** — Reviewer finds problems, Coder fixes them, re-review until clean (configurable iteration limit)
+
+### GitHub Integration
+- Full codebase awareness (list files, read files with optional line ranges)
+- Issue analysis with AI-generated comments, feature branches, file commits, and draft PRs
+- PR review agent (diff analysis, source context reading, COMMENT-only reviews — never approves or merges)
+- Idempotent operations — duplicate prevention for comments, branches, and PRs
+- Webhook listener for `issues.opened` and `pull_request.opened` events
+- `/prompt` command — humans comment on bot PRs to trigger review-fix cycles with custom instructions
+- GitHub App and Personal Access Token authentication
+- Retract command — undo all agent actions on an issue (close PR, delete branch, delete comment)
+
+### Web Dashboard
+- Start, continue, and cancel agent processes from a web UI
+- Live streaming logs via SSE with phase timeline
+- LLM usage metrics — token counts, cost estimation, per-agent and per-model breakdowns
+- Multi-repo management — add/remove repos, select per process
+- Pricing management — built-in defaults + database overrides, retroactive cost recalculation
+- Settings panel — Bitrix24 notification configuration (on/off, connection params)
+
+### CLI
+`poll`, `analyze`, `review`, `retract`, `continue`, `webhook`, `dialog`, `serve`, `dashboard`, `status`, `test-access`, `migrate`, `help`
+
+### LLM Provider Support
+- Anthropic, OpenAI, Ollama, and any OpenAI-compatible API (LM Studio, Together, Groq, etc.)
+- Claude Agent SDK mode (Anthropic-only) — native Claude tools with MCP server integration
+- Per-agent model configuration — use a cheap model for triage, a strong model for coding, etc.
+- Token usage tracking with per-model cost estimation
+
+### Persistence
+- **PostgreSQL** (optional) — poll state, usage records, agent processes, repos, pricing overrides, app settings all survive restarts
+- **File/in-memory fallback** — zero-setup mode when no database is configured
+
+### Deployment
+- Docker Compose stack with Caddy reverse proxy and automatic HTTPS via Cloudflare DNS challenge
+- Cron polling mode for simple setups
+- Unified server mode — dashboard + webhook + dialog on a single port
+
+### Context & Token Management
+- Shared file cache across subagents (30-40% fewer redundant API reads)
+- Conversation pruning (compresses old review-fix cycle messages)
+- Context compaction (truncates old messages when context exceeds threshold)
+- Tool output caps (two-layer: per-tool limits + universal safety net)
+- Diff delta computation (subsequent reviews see only new/changed file sections)
+- Token-efficient prompts (context reuse, targeted partial reads)
+
+### Safety & Reliability
+- Circuit breaker (configurable max tool calls per run)
+- Dry-run mode (skip all GitHub writes)
+- Graceful shutdown (SIGTERM/SIGINT save state before exit)
+- Retry with exponential backoff on transient API failures
+- The bot never merges, never approves, never takes destructive actions
+
+### Interactive Dialog
+- Web chat UI with SSE streaming, live thinking display, and token usage badges
+- Read-only repo access — browse files, list issues, answer codebase questions
+
+### Testing
+- 760 tests across 25 test files (vitest, fully mocked — no real API calls)
 
 ## Prerequisites
 
@@ -108,7 +177,7 @@ LLM_MODEL=claude-sonnet-4-20250514
 # WEBHOOK_SECRET=your-secret   # generate with: openssl rand -hex 32
 ```
 
-See `.env.example` for the full list including GitHub App auth, database, limits, and Docker/Caddy settings.
+See `.env.example` for the full list including GitHub App auth, database, limits, Claude SDK settings, and Docker/Caddy settings.
 
 **Notes:**
 - `ISSUER_LLM_*` / `CODER_LLM_*` / `REVIEWER_LLM_*` are optional — omit them to use the main LLM for everything. Set `_PROVIDER` to enable. Legacy `TRIAGE_LLM_*` env vars are also accepted for backward compat.
@@ -539,7 +608,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-726 tests across 23 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+760 tests across 25 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem, Claude Agent SDK). No real API calls are made during testing.
 
 ## Troubleshooting
 
@@ -583,6 +652,8 @@ learning-deep-agents/
     tool-cache.ts     -- Shared file cache (ToolCache, wrapWithCache, wrapWriteWithInvalidation)
     logger.ts         -- Structured logging (tool calls, agent events, colored diff output)
     utils.ts          -- Retry with exponential backoff for API calls
+    claude-sdk-agent.ts -- Claude Agent SDK entry point (single + multi-agent runners, prompt adaptation, phase detection)
+    claude-sdk-tools.ts -- MCP server factories for GitHub and context tools (createGitHubMcpServer, createContextMcpServer)
     chat-agent.ts     -- Chat agent for human-agent interaction (read-only tools + checkpointer)
     listener.ts       -- Express webhook server, dialog server, /prompt handler, HMAC-SHA256 verification
     process-manager.ts -- EventEmitter-based agent process lifecycle manager (per-process repo override)
@@ -608,6 +679,8 @@ learning-deep-agents/
         001_initial_schema.sql -- Full schema: repos, poll_state, issue_actions, agent_processes, llm_usage
         003_pricing.sql        -- Model pricing override table
   tests/
+    claude-sdk-agent.test.ts -- Claude SDK agent tests (prompt adaptation, model mapping, phase detection, single/multi flows)
+    claude-sdk-tools.test.ts -- Claude SDK MCP server tests (GitHub tools, context tools, idempotency, dry-run)
     architect.test.ts -- Architect supervisor, subagent factories, extractTaskInput, system prompt tests
     single-agent.test.ts -- Single-agent system prompt, tool assembly, dry-run, context tool tests
     context-pruning.test.ts -- Iteration pruning middleware tests (boundary detection, compression, edge cases)
